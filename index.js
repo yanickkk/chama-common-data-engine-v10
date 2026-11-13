@@ -24,15 +24,16 @@ function corsHeaders(request){
 }
 function json(data,request,status=200){return new Response(JSON.stringify(data),{status,headers:corsHeaders(request)});}
 function num(v){const n=Number(String(v??'').replace(/,/g,''));return Number.isFinite(n)?n:null;}
-function code6(v){const s=String(v??'').replace(/\D/g,''); return s ? s.padStart(6,'0') : '';}
-function isValidStockCode(v){const c=code6(v);return /^\d{6}$/.test(c)&&c!=='000000';}
+function normalizeStockCode(v){return String(v??'').trim().toUpperCase();}
+function isValidStockCode(v){const c=normalizeStockCode(v);return /^[0-9A-Z]{6}$/.test(c)&&c!=='000000';}
+function isKisStockCode(v){return /^\d{6}$/.test(normalizeStockCode(v))&&normalizeStockCode(v)!=='000000';}
 function chunks(a,n){const o=[];for(let i=0;i<a.length;i+=n)o.push(a.slice(i,i+n));return o;}
 function normalizeNxt(x){if(!x||typeof x!=='object')return null;const price=num(x.overPrice??x.nxtOverPrice??x.nv??x.price??x.currentPrice);const change=num(x.overChange??x.nxtOverChange??x.cv??x.change);const changePct=num(x.overChangeRate??x.nxtOverChangeRate??x.cr??x.changeRate);return price==null&&change==null&&changePct==null?null:{price,change,changePct,raw:x};}
 
 async function fetchNaver(codes){
   const map={};
   const applyItem=(item,source)=>{
-    const code=code6(item?.cd??item?.itemCode??item?.itemcode??item?.code??item?.symbolCode??item?.isuCd); if(!code||!codes.includes(code))return;
+    const code=normalizeStockCode(item?.cd??item?.itemCode??item?.itemcode??item?.code??item?.symbolCode??item?.isuCd); if(!code||!codes.includes(code))return;
     const price=num(item.nv??item.closePrice??item.nowPrice??item.currentPrice);
     const prev=num(item.pc??item.previousClose??item.lastClosePrice??item.sv);
     const ch=num(item.cv??item.changeValue??item.compareToPreviousClosePrice);
@@ -59,7 +60,7 @@ async function fetchNaver(codes){
           if(depth>8||x==null)return;
           if(Array.isArray(x)){for(const v of x)walk(v,depth+1);return;}
           if(typeof x!=='object')return;
-          const c=code6(x.cd??x.itemCode??x.itemcode??x.code??x.symbolCode??x.isuCd);
+          const c=normalizeStockCode(x.cd??x.itemCode??x.itemcode??x.code??x.symbolCode??x.isuCd);
           if(c&&batch.includes(c))found.push(x);
           for(const v of Object.values(x))if(v&&typeof v==='object')walk(v,depth+1);
         })(d);
@@ -192,6 +193,7 @@ function parseNaverSiseJson(text){
   return rows;
 }
 async function fetchHistoryLegacy(code,days=700){
+  if(!isKisStockCode(code))throw new Error('Naver legacy siseJson은 숫자 6자리 종목코드만 지원하도록 제한했습니다. 영문 종목코드는 paged chart API를 사용하세요.');
   const safeDays=Math.min(2500,Math.max(120,Number(days)||700));
   const end=new Date();end.setUTCHours(0,0,0,0);
   const start=new Date(end.getTime()-safeDays*86400000);
@@ -202,7 +204,7 @@ async function fetchHistoryLegacy(code,days=700){
     const windowStart=new Date(Math.max(start.getTime(),cursor.getTime()-179*86400000));
     const startTime=fmt(windowStart),endTime=fmt(cursor);
     const api=new URL('https://api.finance.naver.com/siseJson.naver');
-    api.searchParams.set('symbol',code6(code));api.searchParams.set('requestType','1');
+    api.searchParams.set('symbol',normalizeStockCode(code));api.searchParams.set('requestType','1');
     api.searchParams.set('startTime',startTime);api.searchParams.set('endTime',endTime);api.searchParams.set('timeframe','day');
     let body=null,lastError=null,status=null;
     for(let attempt=0;attempt<3;attempt++){
@@ -235,7 +237,7 @@ async function fetchHistoryPaged(code,days=700){
   const all=new Map(); let cursor=new Date(end),windowCount=0,lastError=null;
   while(cursor>=start && windowCount<32){
     const windowStart=new Date(Math.max(start.getTime(),cursor.getTime()-119*86400000));
-    const url=`https://api.stock.naver.com/chart/domestic/item/${code6(code)}?periodType=dayCandle&startDateTime=${fmt(windowStart)}&endDateTime=${fmt(cursor)}`;
+    const url=`https://api.stock.naver.com/chart/domestic/item/${normalizeStockCode(code)}?periodType=dayCandle&startDateTime=${fmt(windowStart)}&endDateTime=${fmt(cursor)}`;
     let data=null;
     for(let attempt=0;attempt<3;attempt++){
       try{
@@ -256,154 +258,101 @@ async function fetchHistoryPaged(code,days=700){
     if(cursor>=start)await sleep(120);
   }
   const rows=[...all.values()].sort((a,b)=>String(a.t).localeCompare(String(b.t)));
-  if(!rows.length)throw new Error(`Naver 일봉 응답에 저장 가능한 데이터가 없습니다. code=${code6(code)}, days=${safeDays}, windows=${windowCount}`);
+  if(!rows.length)throw new Error(`Naver 일봉 응답에 저장 가능한 데이터가 없습니다. code=${normalizeStockCode(code)}, days=${safeDays}, windows=${windowCount}`);
   return rows;
 }
 
 async function fetchUniverse(market){
-  const out=[];
-  const headers={'User-Agent':N,'Accept':'application/json,text/html,*/*','Referer':'https://stock.naver.com/'};
+  const requestedMarket=String(market||'ALL').toUpperCase();
+  if(!['ALL','KOSPI','KOSDAQ'].includes(requestedMarket)){
+    throw new Error('market은 ALL, KOSPI 또는 KOSDAQ만 지정할 수 있습니다.');
+  }
+  const pageSize=100;
+  const maxPages=100;
+  const headers={'User-Agent':N,'Accept':'application/json,*/*','Referer':'https://stock.naver.com/'};
+  const byCode=new Map();
   const errors=[];
+  let totalCount=null,sourceItemCount=0,pages=0,complete=false;
 
-  function extractItems(d){
-    const found=[]; const seen=new Set();
-    function walk(x,depth=0){
-      if(depth>7||x==null)return;
-      if(Array.isArray(x)){ for(const v of x)walk(v,depth+1); return; }
-      if(typeof x!=='object')return;
-      const code=x.itemCode??x.itemcode??x.symbolCode??x.stockCode??x.cd??x.code??x.isuCd;
-      const name=x.itemName??x.itemname??x.stockName??x.name??x.nm??x.companyName;
-      if(code && name){
-        const c=code6(code);
-        if(isValidStockCode(c) && !seen.has(c)){seen.add(c);found.push(x);}
-      }
-      for(const v of Object.values(x)) if(v&&typeof v==='object')walk(v,depth+1);
-    }
-    walk(d); return found;
-  }
-  function normalizeItem(x,cat){
-    const code=code6(x?.itemCode??x?.itemcode??x?.symbolCode??x?.stockCode??x?.cd??x?.code??x?.isuCd);
-    if(!isValidStockCode(code))return null;
-    const name=String(x?.itemName??x?.itemname??x?.stockName??x?.name??x?.nm??x?.companyName??'').trim();
-    if(!name)return null;
-    return {code,name,market:cat,
-      marketValue:num(x?.marketValue??x?.marketSum??x?.marketCap??x?.marketCapitalization),
-      listedShares:num(x?.listedShares??x?.listedShareCount),
-      price:num(x?.currentPrice??x?.closePrice??x?.nowPrice??x?.nv??x?.nowVal),
-      changePct:num(x?.fluctuationsRatio??x?.changeRate??x?.cr??x?.changeRate),
-      volume:num(x?.accumulatedTradingVolume??x?.volume??x?.tradeVolume??x?.aq??x?.quant)||0,
-      value:num(x?.accumulatedTradingValue??x?.accumulatedTradingValueAmount??x?.tradingValue??x?.tradeValue??x?.aa??x?.amount)
-    };
-  }
-  async function fetchJson(url){
-    const r=await fetch(url,{headers});
-    const body=await r.text();
-    if(!r.ok)throw new Error(`HTTP ${r.status} ${body.slice(0,160)}`);
-    try{return JSON.parse(body);}catch(e){throw new Error(`JSON parse failed: ${body.slice(0,160)}`);}
-  }
-  async function fetchHtml(url){
-    const r=await fetch(url,{headers:{'User-Agent':N,'Accept':'text/html,*/*','Referer':'https://finance.naver.com/'}});
-    const body=await r.text();
-    if(!r.ok)throw new Error(`HTTP ${r.status} ${body.slice(0,120)}`);
-    return body;
-  }
-  function parsePcMarketSum(html,cat){
-    const arr=[];
-    // finance.naver.com uses href="/item/main.naver?code=005930" with the name in the same anchor.
-    const re=/<a[^>]+href=["']\/item\/main\.naver\?code=(\d{6})["'][^>]*>([^<]+)<\/a>/g; let m;
-    while((m=re.exec(html))){const code=m[1],name=m[2].replace(/&amp;/g,'&').trim();if(name&&!arr.some(x=>x.code===code))arr.push({code,name,market:cat});}
-    return arr;
-  }
+  for(let index=0;index<maxPages;index++){
+    const url=new URL('https://stock.naver.com/api/stockSecurity/individual-stocks/v3/domestic');
+    url.searchParams.set('listingType','tradingValueDesc');
+    url.searchParams.set('exchangeType','consolidated');
+    url.searchParams.set('index',String(index));
+    url.searchParams.set('size',String(pageSize));
 
-  async function tryStockNaverRanking(){
-    // Current stock.naver.com market ranking API. It supports 100-row pages and startIdx paging.
-    const markets=market==='KOSPI'?'KOSPI':market==='KOSDAQ'?'KOSDAQ':'ALL';
-    const all=[];
-    for(let start=0;start<5000;start+=100){
-      const url=`https://stock.naver.com/api/domestic/market/stock/default?tradeType=KRX&marketType=${markets}&orderType=marketSum&startIdx=${start}&pageSize=100`;
+    let payload=null,lastError=null;
+    for(let attempt=0;attempt<3;attempt++){
       try{
-        const d=await fetchJson(url); const rows=extractItems(d).map(x=>normalizeItem(x,market==='ALL'?'KRX':market)).filter(Boolean);
-        if(!rows.length)break; all.push(...rows); if(rows.length<100)break;
-      }catch(e){errors.push(`stock.naver ranking ${start}: ${e.message}`);break;}
-    }
-    return all;
-  }
-
-  // 1) 가장 먼저 현재 stock.naver.com API를 사용합니다. 이 API는 startIdx/pageSize 계약이 확인되어 있습니다.
-  let rows=await tryStockNaverRanking();
-  if(rows.length){
-    const unique=[...new Map(rows.map(x=>[x.code,x])).values()];
-    out.push(...unique);
-  } else {
-    // 2) m.stock front-api fallback: KOSPI/KOSDAQ별 marketValue 목록
-    const cats=market==='KOSPI'||market==='KOSDAQ'?[market]:['KOSPI','KOSDAQ'];
-    for(const cat of cats){
-      let catRows=[];
-      for(let page=1;page<=40 && catRows.length<2500;page++){
-        try{
-          const d=await fetchJson(`https://m.stock.naver.com/front-api/stock/domestic/stockList?sortType=marketValue&category=${cat}&page=${page}&pageSize=100`);
-          const rs=extractItems(d).map(x=>normalizeItem(x,cat)).filter(Boolean); if(!rs.length)break;
-          catRows.push(...rs); if(rs.length<90)break;
-        }catch(e){errors.push(`m.stock ${cat} page ${page}: ${e.message}`);break;}
-      }
-      out.push(...[...new Map(catRows.map(x=>[x.code,x])).values()]);
-    }
-  }
-
-  // 2.5) Legacy mobile market list. It returns current price/change/volume/value together with code/name.
-  // This is used as a supplement even when the newer endpoint returned exactly 100 rows.
-  if(out.length<1500){
-    const cats=market==='KOSPI'||market==='KOSDAQ'?[market]:['KOSPI','KOSDAQ'];
-    for(const cat of cats){
-      const sosok=cat==='KOSPI'?'0':'1';
-      for(let page=1;page<=40 && out.length<5000;page++){
-        try{
-          const d=await fetchJson(`https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok=${sosok}&pageSize=100&page=${page}`);
-          const rs=extractItems(d).map(x=>normalizeItem(x,cat)).filter(Boolean); if(!rs.length)break;
-          out.push(...rs); if(rs.length<90)break;
-        }catch(e){errors.push(`legacy m.stock ${cat} page ${page}: ${e.message}`);break;}
+        const response=await fetch(url.toString(),{headers});
+        const body=await response.text();
+        if(!response.ok)throw new Error(`HTTP ${response.status}: ${body.slice(0,160)}`);
+        payload=JSON.parse(body);
+        lastError=null;
+        break;
+      }catch(e){
+        lastError=e;
+        if(attempt<2)await sleep(300*(attempt+1));
       }
     }
-  }
-
-  // 3) api.stock.naver.com legacy exchange listing fallback
-  if(out.length<1000){
-    const cats=market==='KOSPI'||market==='KOSDAQ'?[market]:['KOSPI','KOSDAQ'];
-    for(const cat of cats){
-      for(let page=1;page<=40 && out.length<5000;page++){
-        try{
-          const d=await fetchJson(`https://api.stock.naver.com/stock/exchange/${cat}/marketValue?page=${page}&pageSize=100`);
-          const rs=extractItems(d).map(x=>normalizeItem(x,cat)).filter(Boolean); if(!rs.length)break;
-          out.push(...rs); if(rs.length<90)break;
-        }catch(e){errors.push(`api.stock ${cat} page ${page}: ${e.message}`);break;}
-      }
+    if(!payload){
+      errors.push(`Naver individual-stocks page ${index}: ${lastError?.message||'unknown error'}`);
+      break;
     }
-  }
-
-  // 4) PC HTML fallback. This only guarantees code/name, but is enough to build a universe;
-  // current quotes are fetched separately through polling.finance.naver.com.
-  if(out.length<1500){
-    const cats=market==='KOSPI'||market==='KOSDAQ'?[market]:['KOSPI','KOSDAQ'];
-    for(const cat of cats){
-      for(let page=1;page<=40 && out.length<5000;page++){
-        try{
-          const sosok=cat==='KOSPI'?'0':'1';
-          const html=await fetchHtml(`https://finance.naver.com/sise/sise_market_sum.naver?sosok=${sosok}&page=${page}`);
-          const rs=parsePcMarketSum(html,cat); if(!rs.length)break; out.push(...rs); if(rs.length<20)break;
-        }catch(e){errors.push(`PC ${cat} page ${page}: ${e.message}`);break;}
-      }
+    if(!Array.isArray(payload.items)){
+      errors.push(`Naver individual-stocks page ${index}: items 배열이 없습니다.`);
+      break;
     }
+
+    pages++;
+    sourceItemCount+=payload.items.length;
+    if(payload.totalCount!=null&&Number.isFinite(Number(payload.totalCount))){
+      totalCount=Number(payload.totalCount);
+    }
+    for(const item of payload.items){
+      const code=normalizeStockCode(item?.itemCode);
+      const name=String(item?.itemName||'').trim();
+      const itemMarket=String(item?.marketType||item?.exchangeType||'').toUpperCase();
+      if(!isValidStockCode(code)||!name||name.length>100||!['KOSPI','KOSDAQ'].includes(itemMarket))continue;
+      const krx=item?.krx||{};
+      byCode.set(code,{
+        code,name,market:itemMarket,
+        tradableStatus:String(krx.tradableStatus??item.tradableStatus??'').trim().toLowerCase(),
+        tradableStatusCode:String(krx.tradableStatusCode??item.tradableStatusCode??'').trim(),
+        marketValue:num(item?.marketValue??item?.marketCap),
+        listedShares:num(item?.listedShares??item?.listedShareCount),
+        price:num(item?.currentPrice??item?.closePrice??item?.nowPrice),
+        changePct:num(item?.fluctuationsRatio??item?.changeRate),
+        volume:num(item?.accumulatedTradingVolume??item?.volume)||0,
+        value:num(item?.accumulatedTradingValue??item?.tradingValue??item?.tradeValue)
+      });
+    }
+
+    if(payload.hasNext===false){complete=true;break;}
+    if(totalCount!=null&&sourceItemCount>=totalCount){complete=true;break;}
+    if(payload.hasNext===true)continue;
+    if(payload.items.length<pageSize){complete=true;break;}
   }
 
-  const unique=[...new Map(out.map(x=>[x.code,x])).values()];
-  console.log(`Universe total: ${unique.length}; errors: ${errors.slice(0,6).join(' | ')}`);
-  return {rows:unique,errors};
+  if(!complete&&totalCount!=null&&sourceItemCount>=totalCount)complete=true;
+  const allRows=[...byCode.values()];
+  const rows=requestedMarket==='ALL'?allRows:allRows.filter(x=>x.market===requestedMarket);
+  if(!pages)throw new Error(errors[0]||'네이버 신규 상장종목 목록을 가져오지 못했습니다.');
+  return {
+    rows,errors,complete,
+    source:'NAVER-INDIVIDUAL-STOCKS-V3',
+    pages,sourceItemCount,totalCount,
+    sourceUniqueCount:allRows.length,
+    market:requestedMarket,
+    coverage:complete?'COMPLETE':'INCOMPLETE',
+    warning:complete?null:'네이버 신규 상장종목 목록의 모든 페이지를 확인하지 못했습니다. 이 결과로 유니버스 저장 또는 전체시장 스캔을 진행하면 안 됩니다.'
+  };
 }
-
 async function screenMarket(market,top,rawCfg){
   const cfg=mergeConfig({...rawCfg,market,top});
   const universeResult=await fetchUniverse(market);
-  const universe=universeResult.rows.filter(x=>!isExcludedName(x.name));
+  if(!universeResult.complete)throw new Error(`종목 유니버스 수집이 불완전합니다. pages=${universeResult.pages}, received=${universeResult.sourceItemCount}, expected=${universeResult.totalCount??'unknown'}; ${(universeResult.errors||[]).join(' | ')}`);
+  const universe=universeResult.rows.filter(isEligibleCommonStock);
   if(!universe.length){ throw new Error('종목 유니버스를 가져오지 못했습니다. '+(universeResult.errors||[]).slice(0,3).join(' | ')); }
 
   // 유니버스 자체에 현재가/등락률/거래대금이 들어 있으면 그것을 1차 시장 스냅샷으로 사용합니다.
@@ -550,20 +499,22 @@ async function kisGet(env, path, params, trId) {
 function normalizeKisQuote(code,d) {
   const x=d.output||{};
   const price=num(x.stck_prpr), prev=num(x.stck_sdpr)||num(x.stck_prdy_clpr);
-  return {code:code6(code),name:x.hts_kor_isnm||'',price,previousClose:prev,change:num(x.prdy_vrss)??(price!=null&&prev!=null?price-prev:null),changePct:num(x.prdy_ctrt)??(price&&prev?(price/prev-1)*100:0),volume:num(x.acml_vol)||0,tradeValue:num(x.acml_tr_pbmn)||0,open:num(x.stck_oprc),high:num(x.stck_hgpr),low:num(x.stck_lwpr),source:'KIS',updatedAt:isoNow()};
+  return {code:normalizeStockCode(code),name:x.hts_kor_isnm||'',price,previousClose:prev,change:num(x.prdy_vrss)??(price!=null&&prev!=null?price-prev:null),changePct:num(x.prdy_ctrt)??(price&&prev?(price/prev-1)*100:0),volume:num(x.acml_vol)||0,tradeValue:num(x.acml_tr_pbmn)||0,open:num(x.stck_oprc),high:num(x.stck_hgpr),low:num(x.stck_lwpr),source:'KIS',updatedAt:isoNow()};
 }
 async function kisQuote(env,code) {
-  const d=await kisGet(env,'/uapi/domestic-stock/v1/quotations/inquire-price',{FID_COND_MRKT_DIV_CODE:'J',FID_INPUT_ISCD:code6(code)},'FHKST01010100');
+  if(!isKisStockCode(code))throw new Error('KIS 시세 API는 숫자 6자리 종목코드만 호출할 수 있습니다.');
+  const d=await kisGet(env,'/uapi/domestic-stock/v1/quotations/inquire-price',{FID_COND_MRKT_DIV_CODE:'J',FID_INPUT_ISCD:normalizeStockCode(code)},'FHKST01010100');
   return normalizeKisQuote(code,d);
 }
 async function kisCandles(env,code,days=700) {
+  if(!isKisStockCode(code))throw new Error('KIS 일봉 API는 숫자 6자리 종목코드만 호출할 수 있습니다.');
   const end=new Date(),start=new Date(end.getTime()-days*86400000),all=new Map(); let cursor=new Date(end),lastDiagnostic=null;
   // KIS 차트 응답 건수 제한에 대비해 가장 오래된 응답일 전날로 조회 구간을 이동합니다.
   for(let page=0;page<12 && cursor>=start;page++){
-    const d=await kisGet(env,'/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice',{FID_COND_MRKT_DIV_CODE:'J',FID_INPUT_ISCD:code6(code),FID_INPUT_DATE_1:ymd(start),FID_INPUT_DATE_2:ymd(cursor),FID_PERIOD_DIV_CODE:'D',FID_ORG_ADJ_PRC:'0'},'FHKST03010100');
+    const d=await kisGet(env,'/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice',{FID_COND_MRKT_DIV_CODE:'J',FID_INPUT_ISCD:normalizeStockCode(code),FID_INPUT_DATE_1:ymd(start),FID_INPUT_DATE_2:ymd(cursor),FID_PERIOD_DIV_CODE:'D',FID_ORG_ADJ_PRC:'0'},'FHKST03010100');
     const arr=Array.isArray(d.output2)?d.output2:[];
     lastDiagnostic={rt_cd:d.rt_cd??null,msg_cd:d.msg_cd??null,msg1:d.msg1??null,output1Type:Array.isArray(d.output1)?'array':typeof d.output1,output2Type:Array.isArray(d.output2)?'array':typeof d.output2,output2Count:arr.length,outputKeys:Object.keys(d||{}),sample:arr[0]||null};
-    for(const x of arr){const row={code:code6(code),date:String(x.stck_bsop_date||''),open:num(x.stck_oprc),high:num(x.stck_hgpr),low:num(x.stck_lwpr),close:num(x.stck_clpr),volume:num(x.acml_vol)||0,tradeValue:num(x.acml_tr_pbmn)||0,source:'KIS'};if(/^\d{8}$/.test(row.date)&&row.close!=null&&row.high!=null&&row.low!=null)all.set(row.date,row);}
+    for(const x of arr){const row={code:normalizeStockCode(code),date:String(x.stck_bsop_date||''),open:num(x.stck_oprc),high:num(x.stck_hgpr),low:num(x.stck_lwpr),close:num(x.stck_clpr),volume:num(x.acml_vol)||0,tradeValue:num(x.acml_tr_pbmn)||0,source:'KIS'};if(/^\d{8}$/.test(row.date)&&row.close!=null&&row.high!=null&&row.low!=null)all.set(row.date,row);}
     if(arr.length<90)break;
     const dates=[...all.keys()].sort(); if(!dates.length)break;
     const oldest=dates[0],dt=new Date(`${oldest.slice(0,4)}-${oldest.slice(4,6)}-${oldest.slice(6,8)}T00:00:00`);dt.setDate(dt.getDate()-1);if(dt>=cursor)break;cursor=dt;
@@ -663,7 +614,7 @@ async function validateUniverseMaster(env, url) {
   const requestedCodes = [...new Set(
     String(url.searchParams.get('codes') || '')
       .split(',')
-      .map(code6)
+      .map(normalizeStockCode)
       .filter(isValidStockCode)
   )];
   if (requestedCodes.length > 100) {
@@ -676,14 +627,14 @@ async function validateUniverseMaster(env, url) {
     'SELECT code, name, market, active FROM stocks WHERE active=1'
   ).all();
   const d1Rows = d1Result.results || [];
-  const d1ByCode = new Map(d1Rows.map(x => [code6(x.code), x]));
-  const referenceByCode = new Map(reference.rows.map(x => [code6(x.code), x]));
+  const d1ByCode = new Map(d1Rows.map(x => [normalizeStockCode(x.code), x]));
+  const referenceByCode = new Map(reference.rows.map(x => [normalizeStockCode(x.code), x]));
 
   const targetCodes = requestedCodes.length
     ? requestedCodes
     : [...new Set([...referenceByCode.keys(), ...d1Rows
         .filter(x => String(x.market || '').toUpperCase() === market)
-        .map(x => code6(x.code))])];
+        .map(x => normalizeStockCode(x.code))])];
 
   const issues = [];
   const counts = {
@@ -718,7 +669,7 @@ async function validateUniverseMaster(env, url) {
     }
 
     const nameMismatch = String(local.name || '').trim() !== String(ref.name || '').trim();
-    const marketMismatch = String(local.market || '').toUpperCase() !== market;
+    const marketMismatch = String(local.market || '').toUpperCase() !== String(ref.market || '').toUpperCase();
     if (nameMismatch) counts.nameMismatch++;
     if (marketMismatch) counts.marketMismatch++;
     if (nameMismatch || marketMismatch) {
@@ -750,8 +701,10 @@ async function validateUniverseMaster(env, url) {
     issues: issues.slice(0, 200),
     issuesTruncated: issues.length > 200,
     sourceErrors: (reference.errors || []).slice(0, 20),
-    referenceCoverage: 'UNVERIFIED',
-    warning: '네이버 공개 목록 응답의 전체 상장종목 커버리지는 별도 검증되지 않았습니다. ABSENT_FROM_REFERENCE_UNVERIFIED는 종목 오류 확정이 아니며, 이 API는 D1 데이터를 수정하지 않습니다.'
+    referenceCoverage: reference.coverage || 'INCOMPLETE',
+    referencePages: reference.pages,
+    referenceTotalCount: reference.totalCount,
+    warning: '네이버 개별주식 목록 API의 응답 범위 내 비교 결과입니다. ABSENT_FROM_REFERENCE_UNVERIFIED는 종목 오류 확정이 아니며, 이 API는 D1 데이터를 수정하지 않습니다.'
   };
 }
 
@@ -762,13 +715,13 @@ async function syncData(env,url) {
   const maxBatch=type==='candles'?1:(type==='quotes'?(selectedProvider==='naver'?20:5):(['indicators','indicators-repair'].includes(type)?(type==='indicators-repair'?1:5):200));
   const limit=Math.min(maxBatch,requestedLimit);
   if(type==='universe'){
-    const market=(url.searchParams.get('market')||'ALL').toUpperCase(); const u=await fetchUniverse(market); await db.prepare("DELETE FROM stocks WHERE code='000000'").run(); const saved=await saveUniverse(db,u.rows);
-    return {ok:true,type,market,found:u.rows.length,saved,errors:(u.errors||[]).slice(0,10),source:'NAVER-MARKET-MASTER',at:isoNow()};
+    const market=(url.searchParams.get('market')||'ALL').toUpperCase(); const u=await fetchUniverse(market); if(!u.complete)throw new Error('종목 유니버스 페이지 수집이 불완전하여 D1 저장을 중단했습니다. '+(u.errors||[]).join(' | ')); await db.prepare("DELETE FROM stocks WHERE code='000000'").run(); const saved=await saveUniverse(db,u.rows);
+    return {ok:true,type,market,found:u.rows.length,saved,pages:u.pages,totalCount:u.totalCount,sourceUniqueCount:u.sourceUniqueCount,coverage:u.coverage,errors:(u.errors||[]).slice(0,10),source:u.source,at:isoNow()};
   }
   if(type==='indicators-repair'){
     // Keyset pagination: 완료된 종목은 후보 목록에서 빠져도 다음 종목을 건너뛰지 않습니다.
     const minCandles=Math.min(250,Math.max(120,Number(url.searchParams.get('minCandles')||120)));
-    const afterCode=code6(url.searchParams.get('afterCode')||'');
+    const afterCode=normalizeStockCode(url.searchParams.get('afterCode')||'');
     const selected=await db.prepare(`
       WITH candle_counts AS (
         SELECT code,COUNT(DISTINCT date) AS candle_count
@@ -821,7 +774,7 @@ async function syncData(env,url) {
   const requestedCode=url.searchParams.get('code');
   let stocks=[];
   if(requestedCode!==null){
-    const target=code6(requestedCode);
+    const target=normalizeStockCode(requestedCode);
     if(!isValidStockCode(target))throw new Error('유효한 6자리 상장 종목 code가 필요합니다. 000000은 사용할 수 없습니다.');
     const selected=await db.prepare('SELECT code,name,market FROM stocks WHERE active=1 AND code=?').bind(target).all();
     stocks=selected.results||[];
@@ -832,7 +785,8 @@ async function syncData(env,url) {
   if(!stocks.length)return {ok:true,type,offset,requestedCode:requestedCode??null,processed:0,message:'대상 종목이 없습니다. 종목 마스터에 code가 등록되어 있는지 확인하세요.'};
   if(type==='quotes'){
     const provider=(url.searchParams.get('provider')||'auto').toLowerCase(), out=[],errors=[];
-    for(const s of stocks){try{let q;if(provider==='naver'||(!env.KIS_APP_KEY&&!env.KIS_APP_SECRET)){const n=await fetchNaver([s.code]);q=n[s.code];if(!q)throw new Error('Naver 시세 없음');}else{q=await kisQuote(env,s.code);await sleep(KIS_MIN_INTERVAL_MS);}out.push({...q,name:q.name||s.name,market:s.market});}catch(e){errors.push({code:s.code,error:e.message});}}
+    const kisConfigured=!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET);
+    for(const s of stocks){try{let q;const useNaver=provider==='naver'||(!kisConfigured&&provider!=='kis')||(provider==='auto'&&!isKisStockCode(s.code));if(useNaver){const n=await fetchNaver([s.code]);q=n[s.code];if(!q)throw new Error('Naver 시세 없음');}else{q=await kisQuote(env,s.code);await sleep(KIS_MIN_INTERVAL_MS);}out.push({...q,name:q.name||s.name,market:s.market});}catch(e){errors.push({code:s.code,error:e.message});}}
     const saved=await saveQuotes(db,out); return {ok:true,type,provider:(provider==='naver'?'NAVER':(env.KIS_APP_KEY?'KIS':'NAVER-FALLBACK')),offset,requestedLimit,appliedLimit:limit,processed:stocks.length,saved,failed:errors.length,errors:errors.slice(0,20),retryCodes:errors.map(x=>x.code),nextOffset:offset+stocks.length,at:isoNow()};
   }
   if(type==='candles'){
@@ -841,11 +795,11 @@ async function syncData(env,url) {
     for(const s of stocks){
       try{
         let rows;
-        if(provider==='naver-legacy'){
+        if(provider==='naver-legacy'&&isKisStockCode(s.code)){
           const result=await fetchHistoryLegacy(s.code,days);
           rows=result.rows.map(x=>({...x,date:String(x.t||'').replace(/-/g,''),source:'NAVER-LEGACY'}));
           diagnostics.push({code:s.code,...result.diagnostics});
-        }else if(provider==='naver'||(!env.KIS_APP_KEY&&!env.KIS_APP_SECRET)){
+        }else if(provider==='naver-legacy'||provider==='naver'||(!env.KIS_APP_KEY&&!env.KIS_APP_SECRET)||(provider==='auto'&&!isKisStockCode(s.code))){
           rows=await fetchHistoryPaged(s.code,days);
           rows=rows.map(x=>({...x,date:String(x.t||'').replace(/-/g,'')})).filter(x=>/^\\d{8}$/.test(x.date)).map(x=>({...x,source:'NAVER-PAGED'}));
         }else{
@@ -979,7 +933,7 @@ async function dataCoverage(env) {
   return {ok:true,totalStocks:n,coverage:{quotes:{stocks:q,missing:Math.max(0,n-q),percent:n?Number((q/n*100).toFixed(2)):0},candles:{stocks:c,rows:Number(candle?.rows||0),missing:Math.max(0,n-c),percent:n?Number((c/n*100).toFixed(2)):0},indicators:{stocks:i,rows:Number(indicator?.rows||0),missing:Math.max(0,n-i),percent:n?Number((i/n*100).toFixed(2)):0}},missingSamples:{quotes:missingQuotes.results||[],candles:missingCandles.results||[],indicators:missingIndicators.results||[]},note:'누락 샘플은 각 항목 최대 20종목입니다.'};
 }
 async function dataRead(env,url,path) {
-  const db=requireDb(env),code=code6(url.searchParams.get('code')||''); if(!/^\d{6}$/.test(code))throw new Error('유효한 code 파라미터가 필요합니다.');
+  const db=requireDb(env),code=normalizeStockCode(url.searchParams.get('code')||''); if(!isValidStockCode(code))throw new Error('유효한 6자리 종목코드가 필요합니다.');
   if(path==='/api/data/candles'){const limit=Math.min(2500,Math.max(1,Number(url.searchParams.get('limit')||700)));const r=await db.prepare('SELECT * FROM stock_daily_candles WHERE code=? ORDER BY date DESC LIMIT ?').bind(code,limit).all();return {ok:true,code,rows:(r.results||[]).reverse()};}
   if(path==='/api/data/indicators'){const limit=Math.min(2500,Math.max(1,Number(url.searchParams.get('limit')||700)));const r=await db.prepare('SELECT * FROM stock_indicators WHERE code=? ORDER BY date DESC LIMIT ?').bind(code,limit).all();return {ok:true,code,rows:(r.results||[]).reverse()};}
   if(path==='/api/data/quote'){
@@ -1025,7 +979,7 @@ function extractNaverThemeStocks(payload) {
   const out=new Map();
   walkObjects(payload,o=>{
     const raw=firstText(o,['itemCode','itemcode','stockCode','symbolCode','cd','code','isuCd']);
-    const code=code6(raw);
+    const code=normalizeStockCode(raw);
     const name=firstText(o,['itemName','stockName','name','nm','companyName','itemname']);
     if (!isValidStockCode(code) || !name || name.length>100) return;
     out.set(code,{code,name});
@@ -1045,9 +999,13 @@ function themeSlug(s) {
 function isEligibleCommonStock(row) {
   const market=String(row.market||'').toUpperCase();
   const name=String(row.name||'').replace(/\s+/g,'').toUpperCase();
+  const tradableStatus=String(row.tradableStatus||'').trim().toLowerCase();
+  const tradableStatusCode=String(row.tradableStatusCode||'').trim().toLowerCase();
   if(!['KOSPI','KOSDAQ','KRX'].includes(market)) return false;
   if(/ETF|ETN|스팩|SPAC/.test(name)) return false;
   if(/우$|우B$|우C$|[0-9]우$|우선주/.test(name)) return false;
+  if(tradableStatus && tradableStatus!=='tradable') return false;
+  if(tradableStatusCode && tradableStatusCode!=='ok') return false;
   return true;
 }
 async function discoverNaverThemeList() {
@@ -1129,7 +1087,7 @@ async function discoverNaverThemeMembers(
       }
 
       const batch = payload.items.map(item => {
-        const code = code6(item.itemCode);
+        const code = normalizeStockCode(item.itemCode);
         const name = String(item.itemName || '').trim();
 
         return {
@@ -1241,7 +1199,7 @@ async function importNaverThemes(env, body) {
   const stockMap = new Map(
     (stockRows.results || [])
       .filter(isEligibleCommonStock)
-      .map(x => [code6(x.code), x])
+      .map(x => [normalizeStockCode(x.code), x])
   );
 
   const existingThemes = await db.prepare(
@@ -1486,7 +1444,7 @@ async function readThemes(env) {
 }
 async function readThemeStocks(env,url) {
   const db=requireDb(env), themeCode=String(url.searchParams.get('theme_code')||'').trim();
-  const code=code6(url.searchParams.get('code')||'');
+  const code=normalizeStockCode(url.searchParams.get('code')||'');
   const limit=Math.min(500,Math.max(1,Number(url.searchParams.get('limit')||200)));
   let sql=`SELECT m.code,s.name,s.market,m.theme_code,t.theme_name,m.relation_type,
       m.allocation_weight,m.relevance_grade,m.evidence_status,m.source_name,
@@ -1505,7 +1463,7 @@ async function readThemeStocks(env,url) {
   return {ok:true,count:(r.results||[]).length,themeCode:themeCode||null,code:code||null,rows:r.results||[]};
 }
 async function readMaterials(env,url) {
-  const db=requireDb(env),code=code6(url.searchParams.get('code')||'');
+  const db=requireDb(env),code=normalizeStockCode(url.searchParams.get('code')||'');
   if(!code){
     const r=await db.prepare(`SELECT material_code,material_name,base_grade,description,verification_rule
       FROM material_types WHERE active=1 ORDER BY base_grade DESC,material_code`).all();
@@ -1521,7 +1479,7 @@ async function readMaterials(env,url) {
 // -----------------------------------------------------------------------------
 
 export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(request.method!=='GET')return json({ok:false,error:'Method Not Allowed'},request,405);
-  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.2-universe-validation' ,endpoints:['/health','/api/data/status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},time:new Date().toISOString()},request);
+  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.3-alpha-code-universe' ,endpoints:['/health','/api/data/status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},time:new Date().toISOString()},request);
   if(url.pathname==='/api/themes'){try{return json(await readThemes(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/themes/stocks'){try{return json(await readThemeStocks(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/materials'){try{return json(await readMaterials(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
@@ -1534,7 +1492,7 @@ export default {async fetch(request,env){const url=new URL(request.url);if(reque
   if(url.pathname==='/api/kis/test'){try{const q=await kisQuote(env,url.searchParams.get('code')||'005930');return json({ok:true,authenticated:true,quote:q,mode:env.KIS_MODE||'paper'},request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   const isMarket=['/api/market','/api/market/'].includes(url.pathname), isAnalysis=['/api/analysis','/api/analysis/'].includes(url.pathname), isScreen=['/api/screener','/api/screener/'].includes(url.pathname); if(!isMarket&&!isAnalysis&&!isScreen)return json({ok:false,error:'Not Found'},request,404);
   if(isScreen){const market=(url.searchParams.get('market')||'ALL').toUpperCase();const top=Math.min(10,Math.max(1,Number(url.searchParams.get('top')||10)));let cfg={};const raw=url.searchParams.get('config');if(raw){try{cfg=JSON.parse(decodeURIComponent(raw));}catch(e){return json({ok:false,error:'config JSON 형식 오류'},request,400);}}try{return json({ok:true,...await screenMarket(market,top,cfg)},request);}catch(e){return json({ok:false,error:e?.message||String(e)},request,502);}}
-  const codes=[...new Set((url.searchParams.get('codes')||'').split(',').map(code6).filter(Boolean))];if(!codes.length)return json({ok:false,error:'codes parameter is required'},request,400);if(codes.length>80)return json({ok:false,error:'Too many codes'},request,400);
+  const codes=[...new Set((url.searchParams.get('codes')||'').split(',').map(normalizeStockCode).filter(isValidStockCode))];if(!codes.length)return json({ok:false,error:'codes parameter is required'},request,400);if(codes.length>80)return json({ok:false,error:'Too many codes'},request,400);
   if(isAnalysis)return json({ok:true,quotes:await getAnalysis(codes),time:new Date().toISOString(),note:'Naver realtime + Naver daily chart; 기술분석은 재현 가능한 지표 기반입니다.'},request);
   return json({ok:true,quotes:await getQuotes(codes),time:new Date().toISOString()},request);
 }};
