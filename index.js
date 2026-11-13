@@ -679,7 +679,7 @@ async function validateUniverseMaster(env, url) {
         code,
         referenceName: ref.name,
         d1Name: local.name,
-        referenceMarket: market,
+        referenceMarket: ref.market,
         d1Market: local.market
       });
     } else {
@@ -691,7 +691,7 @@ async function validateUniverseMaster(env, url) {
     ok: true,
     readOnly: true,
     writesPerformed: 0,
-    source: 'NAVER-MARKET-MASTER',
+    source: reference.source || 'NAVER-INDIVIDUAL-STOCKS-V3',
     market,
     requestedCodes: requestedCodes.length ? requestedCodes : null,
     referenceCount: reference.rows.length,
