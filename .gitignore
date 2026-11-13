@@ -1,7 +1,17 @@
+# Environment and secrets
 .env
 .env.*
 !.env.example
 .dev.vars
+*.pem
+*.key
+
+# Dependencies
 node_modules/
+
+# Cloudflare local files
 .wrangler/
+
+# OS files
 .DS_Store
+Thumbs.db
