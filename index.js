@@ -996,14 +996,35 @@ function themeSlug(s) {
   const ascii=String(s).normalize('NFKD').replace(/[^\w가-힣]+/g,'_').replace(/^_+|_+$/g,'').toUpperCase().slice(0,40);
   return ascii || 'THEME';
 }
+const PREFERRED_STOCK_NAME_EXCEPTIONS = new Set([
+  // 회사명 자체가 '우'로 끝나지만 우선주가 아닌 종목 (2026-11 확인)
+  '성우',
+  '에코글로우'
+]);
+
+const INFRASTRUCTURE_INVESTMENT_NAMES = new Set([
+  // 인프라 투자기구/펀드로 분류해 일반 보통주 유니버스에서 제외
+  '맥쿼리인프라',
+  'KB발해인프라',
+  'NICE인프라'
+]);
+
+function isPreferredStockName(name) {
+  const normalized=String(name||'').replace(/\s+/g,'').toUpperCase();
+  if(PREFERRED_STOCK_NAME_EXCEPTIONS.has(normalized)) return false;
+  return /우선주|우(?:B|C)?$/.test(normalized);
+}
+
 function isEligibleCommonStock(row) {
   const market=String(row.market||'').toUpperCase();
   const name=String(row.name||'').replace(/\s+/g,'').toUpperCase();
   const tradableStatus=String(row.tradableStatus||'').trim().toLowerCase();
   const tradableStatusCode=String(row.tradableStatusCode||'').trim().toLowerCase();
   if(!['KOSPI','KOSDAQ','KRX'].includes(market)) return false;
-  if(/ETF|ETN|스팩|SPAC/.test(name)) return false;
-  if(/우$|우B$|우C$|[0-9]우$|우선주/.test(name)) return false;
+  if(/ETF|ETN|스팩|SPAC|리츠|REIT/.test(name)) return false;
+  if(INFRASTRUCTURE_INVESTMENT_NAMES.has(name)) return false;
+  if(/인프라(?:투자|펀드|투융자)/.test(name)) return false;
+  if(isPreferredStockName(name)) return false;
   if(tradableStatus && tradableStatus!=='tradable') return false;
   if(tradableStatusCode && tradableStatusCode!=='ok') return false;
   return true;
