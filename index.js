@@ -652,6 +652,109 @@ async function dataStatus(env) {
   const [s,q,c,i]=await Promise.all(['stocks','stock_quotes','stock_daily_candles','stock_indicators'].map(t=>db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).first()));
   return {dbConfigured:true,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper',counts:{stocks:s?.n||0,quotes:q?.n||0,candles:c?.n||0,indicators:i?.n||0}};
 }
+// Read-only stock master validation. This endpoint never writes to D1.
+async function validateUniverseMaster(env, url) {
+  const db = requireDb(env);
+  const market = String(url.searchParams.get('market') || '').toUpperCase();
+  if (!['KOSPI', 'KOSDAQ'].includes(market)) {
+    throw new Error('market은 KOSPI 또는 KOSDAQ만 지정할 수 있습니다. 시장별로 각각 검증하세요.');
+  }
+
+  const requestedCodes = [...new Set(
+    String(url.searchParams.get('codes') || '')
+      .split(',')
+      .map(code6)
+      .filter(isValidStockCode)
+  )];
+  if (requestedCodes.length > 100) {
+    throw new Error('한 번에 검증할 수 있는 종목코드는 최대 100개입니다.');
+  }
+
+  // 네이버 공개 종목 목록을 시장별로 수집합니다. fetchUniverse는 D1에 쓰지 않습니다.
+  const reference = await fetchUniverse(market);
+  const d1Result = await db.prepare(
+    'SELECT code, name, market, active FROM stocks WHERE active=1'
+  ).all();
+  const d1Rows = d1Result.results || [];
+  const d1ByCode = new Map(d1Rows.map(x => [code6(x.code), x]));
+  const referenceByCode = new Map(reference.rows.map(x => [code6(x.code), x]));
+
+  const targetCodes = requestedCodes.length
+    ? requestedCodes
+    : [...new Set([...referenceByCode.keys(), ...d1Rows
+        .filter(x => String(x.market || '').toUpperCase() === market)
+        .map(x => code6(x.code))])];
+
+  const issues = [];
+  const counts = {
+    checked: 0,
+    matched: 0,
+    nameMismatch: 0,
+    marketMismatch: 0,
+    missingInD1: 0,
+    absentFromReference: 0
+  };
+
+  for (const code of targetCodes) {
+    const ref = referenceByCode.get(code);
+    const local = d1ByCode.get(code);
+    if (!ref && !local) continue;
+    counts.checked++;
+
+    if (ref && !local) {
+      counts.missingInD1++;
+      issues.push({ type: 'MISSING_IN_D1', code, referenceName: ref.name, referenceMarket: market });
+      continue;
+    }
+    if (!ref && local) {
+      counts.absentFromReference++;
+      issues.push({
+        type: 'ABSENT_FROM_REFERENCE_UNVERIFIED',
+        code,
+        d1Name: local.name,
+        d1Market: local.market
+      });
+      continue;
+    }
+
+    const nameMismatch = String(local.name || '').trim() !== String(ref.name || '').trim();
+    const marketMismatch = String(local.market || '').toUpperCase() !== market;
+    if (nameMismatch) counts.nameMismatch++;
+    if (marketMismatch) counts.marketMismatch++;
+    if (nameMismatch || marketMismatch) {
+      issues.push({
+        type: nameMismatch && marketMismatch ? 'NAME_AND_MARKET_MISMATCH'
+          : nameMismatch ? 'NAME_MISMATCH' : 'MARKET_MISMATCH',
+        code,
+        referenceName: ref.name,
+        d1Name: local.name,
+        referenceMarket: market,
+        d1Market: local.market
+      });
+    } else {
+      counts.matched++;
+    }
+  }
+
+  return {
+    ok: true,
+    readOnly: true,
+    writesPerformed: 0,
+    source: 'NAVER-MARKET-MASTER',
+    market,
+    requestedCodes: requestedCodes.length ? requestedCodes : null,
+    referenceCount: reference.rows.length,
+    d1ActiveCount: d1Rows.length,
+    counts,
+    issueCount: issues.length,
+    issues: issues.slice(0, 200),
+    issuesTruncated: issues.length > 200,
+    sourceErrors: (reference.errors || []).slice(0, 20),
+    referenceCoverage: 'UNVERIFIED',
+    warning: '네이버 공개 목록 응답의 전체 상장종목 커버리지는 별도 검증되지 않았습니다. ABSENT_FROM_REFERENCE_UNVERIFIED는 종목 오류 확정이 아니며, 이 API는 D1 데이터를 수정하지 않습니다.'
+  };
+}
+
 async function syncData(env,url) {
   const db=requireDb(env), type=url.searchParams.get('type')||'universe', requestedLimit=Math.max(1,Number(url.searchParams.get('limit')||50)), offset=Math.max(0,Number(url.searchParams.get('offset')||0));
   // KIS 호출량과 Worker 요청시간을 고려해 시세/일봉은 작은 배치로 제한합니다.
@@ -1418,11 +1521,12 @@ async function readMaterials(env,url) {
 // -----------------------------------------------------------------------------
 
 export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(request.method!=='GET')return json({ok:false,error:'Method Not Allowed'},request,405);
-  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.1-theme-import' ,endpoints:['/health','/api/data/status','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},time:new Date().toISOString()},request);
+  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.2-universe-validation' ,endpoints:['/health','/api/data/status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},time:new Date().toISOString()},request);
   if(url.pathname==='/api/themes'){try{return json(await readThemes(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/themes/stocks'){try{return json(await readThemeStocks(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/materials'){try{return json(await readMaterials(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/status'){try{return json({ok:true,...await dataStatus(env)},request);}catch(e){return json({ok:false,error:e.message},request,500);}}
+  if(url.pathname==='/api/data/universe/validate'){try{return json(await validateUniverseMaster(env,url),request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   if(url.pathname==='/api/data/coverage'){try{return json(await dataCoverage(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/audit'){try{return json(await dataAudit(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/sync'){try{return json(await syncData(env,url),request);}catch(e){return json({ok:false,error:e.message},request,502);}}
