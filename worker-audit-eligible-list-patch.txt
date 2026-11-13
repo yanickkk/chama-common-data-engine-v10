@@ -1,0 +1,58 @@
+READ-ONLY WORKER PATCH: expose eligible stock codes for full indicator validation
+
+File: src/index.js (the deployed Worker source)
+
+Find the return object at the end of async function dataAudit(env, url):
+
+  return {ok:true,totalStocks:all.length,minCandles,historyBands:bands,eligibleForIndicators:eligible,eligibleMissingIndicators,eligiblePartialIndicators,eligibleDateMismatches,eligibleCompleteIndicators,stocksWithIndicators:withIndicators,eligibleNeedsRepair,samples,note:'종목별 distinct 일봉 날짜 수와 일봉-지표 날짜 대조 기준입니다. eligible은 최소 일봉 기준을 충족한 종목입니다.'};
+
+Replace it with:
+
+  const includeDetails = url.searchParams.get('details') === '1';
+  const eligibleStocks = includeDetails
+    ? all
+        .filter(x => Number(x.candle_count) >= minCandles)
+        .map(x => ({
+          code: String(x.code),
+          name: String(x.name || ''),
+          candleCount: Number(x.candle_count || 0),
+          indicatorCount: Number(x.indicator_count || 0),
+          firstDate: x.first_date || null,
+          lastDate: x.last_date || null,
+          indicatorLastDate: x.indicator_last_date || null
+        }))
+    : undefined;
+
+  return {
+    ok:true,
+    totalStocks:all.length,
+    minCandles,
+    historyBands:bands,
+    eligibleForIndicators:eligible,
+    eligibleMissingIndicators,
+    eligiblePartialIndicators,
+    eligibleDateMismatches,
+    eligibleCompleteIndicators,
+    stocksWithIndicators:withIndicators,
+    eligibleNeedsRepair,
+    samples,
+    ...(includeDetails ? { eligibleStocks } : {}),
+    note:'종목별 distinct 일봉 날짜 수와 일봉-지표 날짜 대조 기준입니다. eligible은 최소 일봉 기준을 충족한 종목입니다.'
+  };
+
+This patch only adds an optional read-only list to the existing audit response.
+It does not modify D1, write data, recalculate indicators, or change existing audit behavior.
+
+After deploying the Worker, test in a browser:
+https://chama-market-proxy.yanick-lee.workers.dev/api/data/audit?minCandles=120&details=1
+
+Expected:
+- eligibleForIndicators should be 181 (based on the last audit)
+- eligibleStocks should contain 181 objects with code/name/candleCount/indicatorCount.
+
+Then place validate-all-eligible-indicators.ps1 and the already-tested
+test-indicator-accuracy-fixed.ps1 in the same local project folder and run:
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\validate-all-eligible-indicators.ps1" -WorkerBaseUrl "https://chama-market-proxy.yanick-lee.workers.dev"
+
+The validation wrapper invokes the existing read-only calculation script once with the full eligible code list.

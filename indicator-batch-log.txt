@@ -1,0 +1,144 @@
+INDICATORS offset=0 processed=4 rowsSaved=440 failed=1 next=5
+{"code":"000010","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=5 processed=3 rowsSaved=330 failed=2 next=10
+[{"code":"000088","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000090","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=10 processed=2 rowsSaved=220 failed=3 next=15
+[{"code":"000104","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000110","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000130","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=15 processed=5 rowsSaved=550 failed=0 next=20
+INDICATORS offset=20 processed=1 rowsSaved=110 failed=4 next=25
+[{"code":"000160","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000170","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000190","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000200","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=25 processed=5 rowsSaved=550 failed=0 next=30
+INDICATORS offset=30 processed=4 rowsSaved=440 failed=1 next=35
+{"code":"000260","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=35 processed=3 rowsSaved=330 failed=2 next=40
+[{"code":"000279","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000280","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=40 processed=2 rowsSaved=220 failed=3 next=45
+[{"code":"000350","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000360","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000380","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=45 processed=3 rowsSaved=330 failed=2 next=50
+[{"code":"000410","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000460","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=50 processed=3 rowsSaved=330 failed=2 next=55
+[{"code":"000470","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000499","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=55 processed=3 rowsSaved=330 failed=2 next=60
+[{"code":"000510","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000530","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=60 processed=2 rowsSaved=220 failed=3 next=65
+[{"code":"000570","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000600","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000610","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=65 processed=4 rowsSaved=440 failed=1 next=70
+{"code":"000690","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=70 processed=3 rowsSaved=330 failed=2 next=75
+[{"code":"000710","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000730","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=75 processed=1 rowsSaved=110 failed=4 next=80
+[{"code":"000740","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000780","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000781","error":"¿œ∫¿ 30∞≥ πÃ∏∏"},{"code":"000790","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}]
+INDICATORS offset=0 processed=0 rowsSaved=0 failed=1 next=1
+{"code":"000010","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=1 processed=0 rowsSaved=0 failed=1 next=2
+{"code":"000020","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=2 processed=0 rowsSaved=0 failed=1 next=3
+{"code":"000040","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=3 processed=0 rowsSaved=0 failed=1 next=4
+{"code":"000050","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=4 processed=0 rowsSaved=0 failed=1 next=5
+{"code":"000070","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=5 processed=0 rowsSaved=0 failed=1 next=6
+{"code":"000080","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=6 processed=0 rowsSaved=0 failed=1 next=7
+{"code":"000087","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=7 processed=0 rowsSaved=0 failed=1 next=8
+{"code":"000088","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=0 processed=0 rowsSaved=0 failed=1 next=1
+{"code":"000010","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=1 processed=0 rowsSaved=0 failed=1 next=2
+{"code":"000020","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=2 processed=0 rowsSaved=0 failed=1 next=3
+{"code":"000040","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=3 processed=0 rowsSaved=0 failed=1 next=4
+{"code":"000050","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=4 processed=0 rowsSaved=0 failed=1 next=5
+{"code":"000070","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=5 processed=0 rowsSaved=0 failed=1 next=6
+{"code":"000080","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=6 processed=0 rowsSaved=0 failed=1 next=7
+{"code":"000087","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=7 processed=0 rowsSaved=0 failed=1 next=8
+{"code":"000088","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=8 processed=0 rowsSaved=0 failed=1 next=9
+{"code":"000090","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=9 processed=0 rowsSaved=0 failed=1 next=10
+{"code":"000100","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=10 processed=0 rowsSaved=0 failed=1 next=11
+{"code":"000104","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=11 processed=0 rowsSaved=0 failed=1 next=12
+{"code":"000105","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=12 processed=0 rowsSaved=0 failed=1 next=13
+{"code":"000110","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=13 processed=0 rowsSaved=0 failed=1 next=14
+{"code":"000120","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=14 processed=0 rowsSaved=0 failed=1 next=15
+{"code":"000130","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=15 processed=0 rowsSaved=0 failed=1 next=16
+{"code":"000140","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=16 processed=0 rowsSaved=0 failed=1 next=17
+{"code":"000145","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=17 processed=0 rowsSaved=0 failed=1 next=18
+{"code":"000150","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=18 processed=0 rowsSaved=0 failed=1 next=19
+{"code":"000155","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=19 processed=0 rowsSaved=0 failed=1 next=20
+{"code":"000157","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=20 processed=0 rowsSaved=0 failed=1 next=21
+{"code":"000160","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=21 processed=0 rowsSaved=0 failed=1 next=22
+{"code":"000170","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=22 processed=0 rowsSaved=0 failed=1 next=23
+{"code":"000180","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=23 processed=0 rowsSaved=0 failed=1 next=24
+{"code":"000190","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=24 processed=0 rowsSaved=0 failed=1 next=25
+{"code":"000200","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=25 processed=0 rowsSaved=0 failed=1 next=26
+{"code":"000210","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=26 processed=0 rowsSaved=0 failed=1 next=27
+{"code":"000215","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=27 processed=0 rowsSaved=0 failed=1 next=28
+{"code":"000220","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=28 processed=0 rowsSaved=0 failed=1 next=29
+{"code":"000225","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=29 processed=0 rowsSaved=0 failed=1 next=30
+{"code":"000227","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=30 processed=0 rowsSaved=0 failed=1 next=31
+{"code":"000230","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=31 processed=0 rowsSaved=0 failed=1 next=32
+{"code":"000240","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=32 processed=0 rowsSaved=0 failed=1 next=33
+{"code":"000250","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=33 processed=0 rowsSaved=0 failed=1 next=34
+{"code":"000260","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=34 processed=0 rowsSaved=0 failed=1 next=35
+{"code":"000270","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=35 processed=0 rowsSaved=0 failed=1 next=36
+{"code":"000279","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=36 processed=0 rowsSaved=0 failed=1 next=37
+{"code":"000280","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=37 processed=0 rowsSaved=0 failed=1 next=38
+{"code":"000300","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=38 processed=0 rowsSaved=0 failed=1 next=39
+{"code":"000320","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=39 processed=0 rowsSaved=0 failed=1 next=40
+{"code":"000325","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=40 processed=0 rowsSaved=0 failed=1 next=41
+{"code":"000350","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=41 processed=0 rowsSaved=0 failed=1 next=42
+{"code":"000360","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=42 processed=0 rowsSaved=0 failed=1 next=43
+{"code":"000370","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=43 processed=0 rowsSaved=0 failed=1 next=44
+{"code":"000380","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=44 processed=0 rowsSaved=0 failed=1 next=45
+{"code":"000390","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=45 processed=0 rowsSaved=0 failed=1 next=46
+{"code":"000400","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=46 processed=0 rowsSaved=0 failed=1 next=47
+{"code":"000410","error":"¿œ∫¿ 30∞≥ πÃ∏∏"}
+INDICATORS offset=47 processed=0 rowsSaved=0 failed=1 next=48
+{"code":"000430","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}
+INDICATORS offset=48 processed=0 rowsSaved=0 failed=1 next=49
+{"code":"000440","error":"D1_ERROR: Your account has exceeded D1\u0027s free tier daily row write limit. Upgrade to a paid plan or wait until tomorrow (midnight UTC) to continue. See https://developers.cloudflare.com/d1/platform/limits/ for more details."}

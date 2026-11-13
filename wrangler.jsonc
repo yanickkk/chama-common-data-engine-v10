@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chama-market-proxy",
+  "main": "index.js",
+  "compatibility_date": "2026-11-03",
+  "vars": {
+    "KIS_MODE": "paper",
+    "ALLOW_NAVER_FALLBACK": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chama-market-db",
+      "database_id": "9bc75329-b7de-479d-93e7-a17b4b2ba520"
+    }
+  ]
+}
