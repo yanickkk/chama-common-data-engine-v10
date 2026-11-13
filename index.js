@@ -1119,7 +1119,8 @@ async function importNaverThemes(env, body) {
 
   // 네이버 API는 pageSize를 50으로 요청해도 실제로 10개씩 반환할 수 있습니다.
   const pageSize = Math.min(100, Math.max(10, Math.floor(Number(body.pageSize) || 50)));
-  const maxPages = Math.min(20, Math.max(1, Math.floor(Number(body.maxPages) || 10)));
+  // 568번 테마는 11페이지가 필요했던 검증 사례가 있어 기본값을 20으로 설정합니다.
+  const maxPages = Math.min(20, Math.max(1, Math.floor(Number(body.maxPages) || 20)));
 
   const discovered = await discoverNaverThemeList();
   const selected = discovered.themes.slice(offset, offset + limit);
@@ -1169,6 +1170,10 @@ async function importNaverThemes(env, body) {
 			stockName: stockMap.get(x.code).name
 		  }));
 
+		const unmatchedDetails = members.rows
+		  .filter(x => !stockMap.has(x.code))
+		  .map(x => ({ code: x.code, name: x.name, market: x.market }));
+
 		const themeCode =
 		  existingThemeByName.get(theme.name) ||
 		  `NV_${themeSlug(theme.name)}_${theme.sourceId}`.slice(0, 80);
@@ -1179,6 +1184,8 @@ async function importNaverThemes(env, body) {
 		  themeCode,
 		  found: members.rows.length,
 		  matched: matched.length,
+		  unmatchedCount: unmatchedDetails.length,
+		  unmatchedDetails,
 		  pages: members.pages,
 		  marketStats: members.marketStats,
 		  pageStats: members.pageStats,
@@ -1243,7 +1250,11 @@ async function importNaverThemes(env, body) {
           )
           ON CONFLICT(theme_code) DO UPDATE SET
             theme_name=excluded.theme_name,
-            source_name='NAVER_THEME',
+            source_name=CASE
+              WHEN themes.source_name IS NULL OR themes.source_name=''
+              THEN excluded.source_name
+              ELSE themes.source_name
+            END,
             active=1,
             updated_at=excluded.updated_at
         `).bind(t.themeCode, t.themeName, now)
@@ -1283,7 +1294,11 @@ async function importNaverThemes(env, body) {
             NULL, 1, ?
           )
           ON CONFLICT(code, theme_code) DO UPDATE SET
-            source_name='NAVER_THEME',
+            source_name=CASE
+              WHEN theme_stock_map.evidence_status='CONFIRMED'
+              THEN COALESCE(NULLIF(theme_stock_map.source_name,''), excluded.source_name)
+              ELSE excluded.source_name
+            END,
             evidence_status=CASE
               WHEN theme_stock_map.evidence_status='CONFIRMED'
               THEN 'CONFIRMED'
@@ -1344,7 +1359,12 @@ async function importNaverThemes(env, body) {
 
     memberRows: mapRows.length,
     uniqueMappings: uniqueMap.length,
-    unmatchedMembers: Math.max(0, totalMembersFound - mapRows.length),
+    unmatchedMembers: reports.reduce((sum, x) => sum + (x.unmatchedCount || 0), 0),
+    unmatchedDetails: reports
+      .filter(x => x.unmatchedDetails?.length)
+      .map(x => ({ sourceId: x.sourceId, themeName: x.themeName, items: x.unmatchedDetails })),
+    themeListCoverage: 'UNVERIFIED',
+    themeListWarning: '네이버 테마 목록 API의 전체 건수 또는 페이지네이션이 검증되지 않았습니다. 현재 응답에서 발견된 테마만 조회하며, 전체 테마 수집 완료를 의미하지 않습니다.',
 
     canApply: failedReports.length === 0,
     reports,
