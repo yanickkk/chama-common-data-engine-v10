@@ -1021,7 +1021,9 @@ function isEligibleCommonStock(row) {
   const tradableStatus=String(row.tradableStatus||'').trim().toLowerCase();
   const tradableStatusCode=String(row.tradableStatusCode||'').trim().toLowerCase();
   if(!['KOSPI','KOSDAQ','KRX'].includes(market)) return false;
-  if(/ETF|ETN|스팩|SPAC|리츠|REIT/.test(name)) return false;
+  if(/ETF|ETN|스팩|SPAC/.test(name)) return false;
+  // 리츠 명칭은 접미사 기준으로 판별하고, 예외적으로 이리츠코크렙을 별도 제외한다.
+  if(/(?:리츠|REIT)$/.test(name)||name==='이리츠코크렙') return false;
   if(INFRASTRUCTURE_INVESTMENT_NAMES.has(name)) return false;
   if(/인프라(?:투자|펀드|투융자)/.test(name)) return false;
   if(isPreferredStockName(name)) return false;
