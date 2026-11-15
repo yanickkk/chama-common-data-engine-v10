@@ -106,7 +106,7 @@ function isExcludedName(name){return /(ETF|ETN|스팩|SPAC)/i.test(String(name||
 function buildChama(rows, q, cfg={}){
   const c=rows.map(x=>x.close), close=Number(q.price??c.at(-1));
   if(!close||rows.length<130)return {chama:false,count:0,flags:{}};
-  const e5=ema(c,5).at(-1),e10=ema(c,10).at(-1),e20=ema(c,20).at(-1),e60=ema(c,60).at(-1),e120=ema(c,120).at(-1);
+  const e5=emaSeries(c,5).at(-1),e10=emaSeries(c,10).at(-1),e20=emaSeries(c,20).at(-1),e60=emaSeries(c,60).at(-1),e120=emaSeries(c,120).at(-1);
   const maCfg=cfg.maProximityPct??3;
   const maLines=[['세력선1(5)',e5],['세력선2(10)',e10],['황금선(20)',e20],['수급선(60)',e60],['대세선(120)',e120]];
   const maHit=maLines.some(([,v])=>v&&Math.abs(close/v-1)*100<=maCfg);
@@ -132,7 +132,7 @@ function buildChama(rows, q, cfg={}){
   if(ref){ const lo=Math.max(0,ref.i-(cfg.resistanceLookbackDays??60)); const prior=rows.slice(lo,ref.i).map(x=>x.high||0); const resistance=prior.length?Math.max(...prior):null; 저지바Hit=!!resistance && Math.abs(close/resistance-1)*100 <= (cfg.resistanceProximityPct??3); }
   const envPct=cfg.safetyBeltPct??10;
   const env20=e20*(1-envPct/100);
-  const prevEnv=rows.length>1 ? ema(c.slice(0,-1),20).at(-1)*(1-envPct/100):null;
+  const prevEnv=rows.length>1 ? emaSeries(c.slice(0,-1),20).at(-1)*(1-envPct/100):null;
   const safetyFirst=close<=env20*(1+(cfg.firstEntryTolerancePct??0)/100) && (prevEnv==null || rows.at(-2).close>prevEnv);
   const sdN=cfg.bollingerPeriod??20; const mean=sma(c,sdN); const slice=c.slice(-sdN); const sd=Math.sqrt(slice.reduce((s,x)=>s+(x-mean)**2,0)/sdN); const lower=mean-(cfg.bollingerSigma??2)*sd;
   const pSlice=c.slice(-(sdN+1),-1); const pm=sma(pSlice,sdN); const ps=pSlice.length===sdN?Math.sqrt(pSlice.reduce((s,x)=>s+(x-pm)**2,0)/sdN):null; const prevLower=pm!=null&&ps!=null?pm-(cfg.bollingerSigma??2)*ps:null;
@@ -170,8 +170,7 @@ function cmMatches(rows,cfg){
   return out;
 }
 async function fetchHistory(code,days=700){
-  const end=new Date(), start=new Date(end.getTime()-days*86400000); const fmt=d=>`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-  const url=`https://api.stock.naver.com/chart/domestic/item/${code}?periodType=dayCandle&startDateTime=${fmt(start)}&endDateTime=${fmt(end)}`; const r=await fetch(url,{headers:{'User-Agent':N,'Accept':'application/json'}}); if(!r.ok)throw new Error(`Naver chart ${r.status}`); const d=await r.json(); const rows=d?.priceInfos||d?.chart?.priceInfos||d?.result?.priceInfos||[]; return rows.map(x=>({t:x.localDate||x.localTradedAt||x.date,open:num(x.openPrice??x.open),high:num(x.highPrice??x.high),low:num(x.lowPrice??x.low),close:num(x.closePrice??x.close),volume:num(x.accumulatedTradingVolume??x.volume)||0})).filter(x=>x.close!=null&&x.high!=null&&x.low!=null);
+  return fetchHistoryPaged(code,days);
 }
 
 // 네이버 일봉 차트 API는 한 번의 요청에서 약 110거래일 수준만 반환할 수 있습니다.
@@ -193,7 +192,7 @@ function parseNaverSiseJson(text){
   return rows;
 }
 async function fetchHistoryLegacy(code,days=700){
-  if(!isKisStockCode(code))throw new Error('Naver legacy siseJson은 숫자 6자리 종목코드만 지원하도록 제한했습니다. 영문 종목코드는 paged chart API를 사용하세요.');
+  if(!isValidStockCode(code))throw new Error('유효하지 않은 종목코드입니다.');
   const safeDays=Math.min(2500,Math.max(120,Number(days)||700));
   const end=new Date();end.setUTCHours(0,0,0,0);
   const start=new Date(end.getTime()-safeDays*86400000);
@@ -230,36 +229,8 @@ async function fetchHistoryLegacy(code,days=700){
 }
 
 async function fetchHistoryPaged(code,days=700){
-  const safeDays=Math.min(2500,Math.max(120,Number(days)||700));
-  const end=new Date(); end.setUTCHours(0,0,0,0);
-  const start=new Date(end.getTime()-safeDays*86400000);
-  const fmt=d=>`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`;
-  const all=new Map(); let cursor=new Date(end),windowCount=0,lastError=null;
-  while(cursor>=start && windowCount<32){
-    const windowStart=new Date(Math.max(start.getTime(),cursor.getTime()-119*86400000));
-    const url=`https://api.stock.naver.com/chart/domestic/item/${normalizeStockCode(code)}?periodType=dayCandle&startDateTime=${fmt(windowStart)}&endDateTime=${fmt(cursor)}`;
-    let data=null;
-    for(let attempt=0;attempt<3;attempt++){
-      try{
-        const response=await fetch(url,{headers:{'User-Agent':N,'Accept':'application/json,*/*','Referer':'https://m.stock.naver.com/'}});
-        if(!response.ok)throw new Error(`HTTP ${response.status}`);
-        data=await response.json(); lastError=null; break;
-      }catch(e){lastError=e;if(attempt<2)await sleep(250*(attempt+1));}
-    }
-    if(!data)throw new Error(`Naver 일봉 구간 조회 실패(${fmt(windowStart)}~${fmt(cursor)}): ${lastError?.message||'unknown error'}`);
-    const items=Array.isArray(data)?data:(data?.priceInfos||data?.chart?.priceInfos||data?.result?.priceInfos||[]);
-    for(const x of items){
-      const date=String(x.localDate||x.localTradedAt||x.date||'').replace(/-/g,'').slice(0,8);
-      const row={t:date,open:num(x.openPrice??x.open),high:num(x.highPrice??x.high),low:num(x.lowPrice??x.low),close:num(x.closePrice??x.close),volume:num(x.accumulatedTradingVolume??x.volume)||0};
-      if(/^\d{8}$/.test(date)&&row.close!=null&&row.close>0&&row.high!=null&&row.low!=null)all.set(date,row);
-    }
-    windowCount++;
-    cursor=new Date(windowStart.getTime()-86400000);
-    if(cursor>=start)await sleep(120);
-  }
-  const rows=[...all.values()].sort((a,b)=>String(a.t).localeCompare(String(b.t)));
-  if(!rows.length)throw new Error(`Naver 일봉 응답에 저장 가능한 데이터가 없습니다. code=${normalizeStockCode(code)}, days=${safeDays}, windows=${windowCount}`);
-  return rows;
+  const result=await fetchHistoryLegacy(code,days);
+  return result.rows;
 }
 
 async function fetchUniverse(market){
@@ -571,27 +542,77 @@ async function saveQuotes(db,rows) {
   await d1Batch(db,stmts); return stmts.length;
 }
 async function saveCandles(db,code,rows) {
-  // 기존 날짜는 재저장하지 않습니다. 단, 가장 최근 날짜만은 당일 진행 중인 일봉 정정 가능성을 위해 값이 바뀐 경우 갱신합니다.
+  // 모든 날짜를 NAVER 원본과 비교하고 실제 변경된 행만 갱신합니다.
   const existingResult=await db.prepare('SELECT date,open,high,low,close,volume,trade_value,source FROM stock_daily_candles WHERE code=?').bind(code).all();
   const existingRows=existingResult.results||[];
   const existing=new Map(existingRows.map(x=>[String(x.date),x]));
-  const latestExistingDate=[...existing.keys()].sort().at(-1)||'';
   const byDate=new Map();
+
   for(const x of rows||[]){
     const date=String(x.date||'');
-    if(/^\d{8}$/.test(date)&&Number.isFinite(Number(x.close))&&Number(x.close)>0)byDate.set(date,x);
+    const validDate=date.length===8 && [...date].every(ch=>ch>='0'&&ch<='9');
+    if(validDate&&Number.isFinite(Number(x.close))&&Number(x.close)>0){
+      byDate.set(date,x);
+    }
   }
-  const toWrite=[]; let unchanged=0,updated=0;
+
+  const toWrite=[];
+  let unchanged=0,updated=0;
+
   for(const x of byDate.values()){
     const old=existing.get(String(x.date));
-    if(!old){toWrite.push(x);continue;}
-    const isLatest=String(x.date)===latestExistingDate;
-    const changed=['open','high','low','close','volume','trade_value'].some(k=>Number(old[k]??0)!==Number((k==='trade_value'?x.tradeValue:x[k])??0));
-    if(isLatest&&changed){toWrite.push(x);updated++;} else {unchanged++;}
+    if(!old){
+      toWrite.push(x);
+      continue;
+    }
+
+    const changed=
+      ['open','high','low','close','volume'].some(
+        k=>Number(old[k]??0)!==Number(x[k]??0)
+      ) ||
+      (x.tradeValue!=null && Number(old.trade_value??0)!==Number(x.tradeValue)) ||
+      String(old.source||'UNKNOWN')!=='NAVER';
+
+    if(changed){
+      toWrite.push(x);
+      updated++;
+    }else{
+      unchanged++;
+    }
   }
-  const stmts=toWrite.map(x=>db.prepare(`INSERT INTO stock_daily_candles(code,date,open,high,low,close,volume,trade_value,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code,date) DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,trade_value=excluded.trade_value,source=excluded.source,updated_at=excluded.updated_at WHERE stock_daily_candles.open IS NOT excluded.open OR stock_daily_candles.high IS NOT excluded.high OR stock_daily_candles.low IS NOT excluded.low OR stock_daily_candles.close IS NOT excluded.close OR stock_daily_candles.volume IS NOT excluded.volume OR stock_daily_candles.trade_value IS NOT excluded.trade_value`).bind(code,x.date,x.open,x.high,x.low,x.close,x.volume||0,x.tradeValue||0,x.source||'UNKNOWN',isoNow()));
-  await d1Batch(db,stmts);
-  return {inserted:toWrite.length-updated,updated,unchanged};
+
+  const stmts=toWrite.map(x=>db.prepare(
+    `INSERT INTO stock_daily_candles
+    (code,date,open,high,low,close,volume,trade_value,source,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(code,date) DO UPDATE SET
+    open=excluded.open,
+    high=excluded.high,
+    low=excluded.low,
+    close=excluded.close,
+    volume=excluded.volume,
+    trade_value=excluded.trade_value,
+    source=excluded.source,
+    updated_at=excluded.updated_at
+    WHERE stock_daily_candles.open IS NOT excluded.open
+    OR stock_daily_candles.high IS NOT excluded.high
+    OR stock_daily_candles.low IS NOT excluded.low
+    OR stock_daily_candles.close IS NOT excluded.close
+    OR stock_daily_candles.volume IS NOT excluded.volume
+    OR stock_daily_candles.trade_value IS NOT excluded.trade_value
+    OR stock_daily_candles.source IS NOT excluded.source`
+  ).bind(
+    code,x.date,x.open,x.high,x.low,x.close,
+    x.volume||0,(x.tradeValue??existing.get(String(x.date))?.trade_value??0),'NAVER',isoNow()
+  ));
+
+  if(stmts.length) await d1Batch(db,stmts);
+
+  return {
+    inserted:toWrite.length-updated,
+    updated,
+    unchanged
+  };
 }
 async function saveIndicators(db,code,rows) {
   // 값이 실제로 달라진 날짜만 UPDATE합니다. 동일한 지표를 재계산해도 D1 row write가 발생하지 않습니다.
@@ -790,26 +811,101 @@ async function syncData(env,url) {
     const saved=await saveQuotes(db,out); return {ok:true,type,provider:(provider==='naver'?'NAVER':(env.KIS_APP_KEY?'KIS':'NAVER-FALLBACK')),offset,requestedLimit,appliedLimit:limit,processed:stocks.length,saved,failed:errors.length,errors:errors.slice(0,20),retryCodes:errors.map(x=>x.code),nextOffset:offset+stocks.length,at:isoNow()};
   }
   if(type==='candles'){
-    const days=Math.min(2500,Math.max(120,Number(url.searchParams.get('days')||700))),provider=(url.searchParams.get('provider')||'auto').toLowerCase(),errors=[];let saved=0,updated=0,unchanged=0;
+    const days=Math.min(2500,Math.max(120,Number(url.searchParams.get('days')||700)));
+    const minCandles=Math.min(250,Math.max(120,Number(url.searchParams.get('minCandles')||120)));
+    const provider='naver',errors=[],indicatorErrors=[];
+    let saved=0,updated=0,unchanged=0;
+    let indicatorStocksRecalculated=0,indicatorStocksSkipped=0;
+    let indicatorStocksUnchanged=0,indicatorRowsProcessed=0;
     const diagnostics=[];
+
     for(const s of stocks){
       try{
         let rows;
+
         if(provider==='naver-legacy'&&isKisStockCode(s.code)){
           const result=await fetchHistoryLegacy(s.code,days);
           rows=result.rows.map(x=>({...x,date:String(x.t||'').replace(/-/g,''),source:'NAVER-LEGACY'}));
           diagnostics.push({code:s.code,...result.diagnostics});
         }else if(provider==='naver-legacy'||provider==='naver'||(!env.KIS_APP_KEY&&!env.KIS_APP_SECRET)||(provider==='auto'&&!isKisStockCode(s.code))){
           rows=await fetchHistoryPaged(s.code,days);
-          rows=rows.map(x=>({...x,date:String(x.t||'').replace(/-/g,'')})).filter(x=>/^\\d{8}$/.test(x.date)).map(x=>({...x,source:'NAVER-PAGED'}));
+          rows=rows.map(x=>({...x,date:String(x.t||'').replace(/-/g,'')}))
+            .filter(x=>/^\d{8}$/.test(x.date))
+            .map(x=>({...x,source:'NAVER'}));
         }else{
-          rows=await kisCandles(env,s.code,days);await sleep(KIS_MIN_INTERVAL_MS);
+          rows=await kisCandles(env,s.code,days);
+          await sleep(KIS_MIN_INTERVAL_MS);
         }
-        const writeResult=await saveCandles(db,s.code,rows); saved+=writeResult.inserted; updated+=writeResult.updated; unchanged+=writeResult.unchanged;
-      }catch(e){errors.push({code:s.code,error:e.message});}
+
+        const writeResult=await saveCandles(db,s.code,rows);
+        saved+=writeResult.inserted;
+        updated+=writeResult.updated;
+        unchanged+=writeResult.unchanged;
+
+        // 일봉에 신규/수정이 있을 때만 해당 종목의 전체 지표를 다시 계산합니다.
+        if((writeResult.inserted+writeResult.updated)>0){
+          try{
+            const candleResult=await db.prepare(
+              'SELECT date,open,high,low,close,volume FROM stock_daily_candles WHERE code=? ORDER BY date ASC'
+            ).bind(s.code).all();
+
+            const candles=candleResult.results||[];
+            const validCount=candles.filter(
+              x=>/^\d{8}$/.test(String(x.date||''))&&Number.isFinite(Number(x.close))&&Number(x.close)>0
+            ).length;
+
+            if(validCount<minCandles){
+              indicatorStocksSkipped++;
+            }else{
+              const indicatorRows=calculateIndicatorRows(s.code,candles);
+
+              if(indicatorRows.length<minCandles){
+                indicatorStocksSkipped++;
+              }else{
+                await saveIndicators(db,s.code,indicatorRows);
+                indicatorStocksRecalculated++;
+                indicatorRowsProcessed+=indicatorRows.length;
+              }
+            }
+          }catch(e){
+            indicatorErrors.push({code:s.code,error:e.message});
+          }
+        }else{
+          indicatorStocksUnchanged++;
+        }
+      }catch(e){
+        errors.push({code:s.code,error:e.message});
+      }
     }
+
     const providerLabel=provider==='naver-legacy'?'NAVER-LEGACY':(provider==='naver'?'NAVER':(env.KIS_APP_KEY?'KIS':'NAVER-FALLBACK'));
-    return {ok:true,type,provider:providerLabel,offset,requestedLimit,appliedLimit:limit,processed:stocks.length,candlesSaved:saved,candlesUpdated:updated,candlesUnchanged:unchanged,failed:errors.length,errors:errors.slice(0,20),retryCodes:errors.map(x=>x.code),diagnostics,nextOffset:offset+stocks.length,at:isoNow()};
+
+    return {
+      ok:true,
+      type,
+      provider:providerLabel,
+      offset,
+      requestedLimit,
+      appliedLimit:limit,
+      processed:stocks.length,
+      candlesSaved:saved,
+      candlesUpdated:updated,
+      candlesUnchanged:unchanged,
+      indicatorAlgorithm:'SMA-seeded EMA / Wilder RSI / standard MACD',
+      indicatorMinCandles:minCandles,
+      indicatorStocksRecalculated,
+      indicatorStocksSkipped,
+      indicatorStocksUnchanged,
+      indicatorRowsProcessed,
+      indicatorFailed:indicatorErrors.length,
+      indicatorErrors:indicatorErrors.slice(0,20),
+      failed:errors.length,
+      errors:errors.slice(0,20),
+      retryCodes:errors.map(x=>x.code),
+      diagnostics,
+      nextOffset:offset+stocks.length,
+      at:isoNow()
+    };
   }
   if(type==='indicators'){
     // EMA120 계산에 필요한 최소 이력은 120거래일입니다. 250일 미만은 계산은 하되
