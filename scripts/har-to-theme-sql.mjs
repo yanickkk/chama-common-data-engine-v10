@@ -20,26 +20,29 @@ if (!input) {
   process.exit(2);
 }
 
-const ALLOWED = key => key === 'cm_calendar_daily' || key === 'cm_theme_history' ||
-  key === 'cm_keyword_map' || /^cm_(theme_issue_auto|schedule_week|step3_date|news_material)_20\\d{2}-\\d{2}-\\d{2}$/.test(key);
-const sql = v => v == null ? 'NULL' : `'${String(v).replaceAll("'", "''")}'`;
+const isAllowedKey = key =>
+  key === 'cm_calendar_daily' || key === 'cm_theme_history' || key === 'cm_keyword_map' ||
+  ['cm_theme_issue_auto_', 'cm_schedule_week_', 'cm_step3_date_', 'cm_news_material_']
+    .some(prefix => key.startsWith(prefix) && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(key.slice(prefix.length)));
+const sql = v => v == null ? 'NULL' : "'" + String(v).replaceAll("'", "''") + "'";
 const asText = v => typeof v === 'string' ? v : JSON.stringify(v);
 const sha = v => crypto.createHash('sha256').update(asText(v)).digest('hex');
 const dateFrom = row => {
   const candidates = [row?.date, row?.base_date, row?.data_date, row?.trade_date, row?.ymd, row?.week_start, row?.start_date];
   for (const x of candidates) {
     if (typeof x !== 'string') continue;
-    const m = x.match(/(20\\d{2})[-.]?(\\d{2})[-.]?(\\d{2})/);
-    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    const m = x.match(/(20[0-9]{2})[-.]?([0-9]{2})[-.]?([0-9]{2})/);
+    if (m) return m[1] + '-' + m[2] + '-' + m[3];
   }
   return '';
 };
 const keyFrom = row => String(row?.key ?? row?.data_key ?? row?.app_key ?? row?.name ?? '');
 const entries = [];
-const har = JSON.parse(fs.readFileSync(input, 'utf8').replace(/^\\uFEFF/, ''));
+const harText = fs.readFileSync(input, 'utf8').replace(String.fromCharCode(0xFEFF), '');
+const har = JSON.parse(harText);
 for (const entry of har?.log?.entries ?? []) {
   const reqUrl = entry?.request?.url ?? '';
-  if (!/\\/rest\\/v1\\/app_data(?:\\?|$)/i.test(reqUrl)) continue;
+  if (!reqUrl.includes('/rest/v1/app_data')) continue;
   const content = entry?.response?.content;
   if (!content?.text) continue;
   let bodyText = content.text;
@@ -49,7 +52,7 @@ for (const entry of har?.log?.entries ?? []) {
   const rows = Array.isArray(body) ? body : [body];
   for (const row of rows) {
     const key = keyFrom(row);
-    if (!ALLOWED(key)) continue;
+    if (!isAllowedKey(key)) continue;
     const payload = row?.value ?? row?.data ?? row?.json_data ?? row;
     const payloadRows = Array.isArray(payload) ? payload : [payload];
     payloadRows.forEach((item, idx) => {
@@ -68,24 +71,32 @@ if (!entries.length) {
 fs.mkdirSync(outDir, { recursive: true });
 const seen = new Set();
 const unique = entries.filter(x => {
-  const k = `${x.key}\\u0000${x.date}\\u0000${x.recordId}`;
+  const k = [x.key, x.date, x.recordId].join('|');
   if (seen.has(k)) return false;
   seen.add(k); return true;
 });
-const statements = unique.map(x => `INSERT OR REPLACE INTO theme_source_records (source_name,source_key,source_date,record_id,payload_json,source_url,payload_sha256,imported_at) VALUES ('SUPABASE_APP_DATA',${sql(x.key)},${sql(x.date)},${sql(x.recordId)},${sql(x.payloadJson)},${sql(x.sourceUrl)},${sql(x.hash)},CURRENT_TIMESTAMP);`);
+const statements = unique.map(x =>
+  "INSERT OR REPLACE INTO theme_source_records (source_name,source_key,source_date,record_id,payload_json,source_url,payload_sha256,imported_at) VALUES ('SUPABASE_APP_DATA'," +
+  [x.key, x.date, x.recordId, x.payloadJson, x.sourceUrl, x.hash].map(sql).join(',') +
+  ',CURRENT_TIMESTAMP);'
+);
+const newline = String.fromCharCode(10);
 const maxBytes = 400_000;
 let part = 1, buffer = '';
 for (const statement of statements) {
-  if (Buffer.byteLength(buffer + statement + '\\n') > maxBytes && buffer) {
-    fs.writeFileSync(path.join(outDir, `theme-source-${String(part++).padStart(3,'0')}.sql`), buffer);
+  if (Buffer.byteLength(buffer + statement + newline) > maxBytes && buffer) {
+    fs.writeFileSync(path.join(outDir, 'theme-source-' + String(part++).padStart(3,'0') + '.sql'), buffer);
     buffer = '';
   }
-  buffer += statement + '\\n';
+  buffer += statement + newline;
 }
-if (buffer) fs.writeFileSync(path.join(outDir, `theme-source-${String(part).padStart(3,'0')}.sql`), buffer);
+if (buffer) fs.writeFileSync(path.join(outDir, 'theme-source-' + String(part).padStart(3,'0') + '.sql'), buffer);
 const dates = unique.map(x=>x.date).filter(Boolean).sort();
-const report = { input: path.resolve(input), entriesInHar: har?.log?.entries?.length ?? 0,
-  matchingRows: entries.length, uniqueRecords: unique.length, keys: [...new Set(unique.map(x=>x.key))].sort(),
-  dateRange: { from: dates[0] ?? null, to: dates.at(-1) ?? null }, sqlFiles: part };
+const report = {
+  input: path.resolve(input), entriesInHar: har?.log?.entries?.length ?? 0,
+  matchingRows: entries.length, uniqueRecords: unique.length,
+  keys: [...new Set(unique.map(x=>x.key))].sort(),
+  dateRange: { from: dates[0] ?? null, to: dates.at(-1) ?? null }, sqlFiles: part
+};
 fs.writeFileSync(path.join(outDir, 'import-report.json'), JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));
