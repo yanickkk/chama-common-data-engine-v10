@@ -343,6 +343,11 @@ async function screenMarket(market,top,rawCfg){
     const value=q.value??u.value??((price!=null)?price*volume:0);
     return {...u,...q,price,changePct,volume,value,quoteSource:q.source||'UNIVERSE-SNAPSHOT'};
   }).filter(x=>x.price!=null || x.value>0);
+  const historyCache=new Map();
+  const loadHistory=async code=>{
+    if(!historyCache.has(code))historyCache.set(code,fetchHistory(code,700));
+    return historyCache.get(code);
+  };
 
   // 당일 상승률 Top100의 모수가 전체 시장이어야 하므로, 거래대금 조건을 먼저 적용한 뒤 상승률 순으로 정렬합니다.
   // 거래대금이 없는 행은 CM 모수에서 제외합니다.
@@ -351,10 +356,11 @@ async function screenMarket(market,top,rawCfg){
     .sort((a,b)=>Number(b.changePct||0)-Number(a.changePct||0))
     .slice(0,Number(cfg.cmTop100||100));
 
-  const cmEvents=[]; const chamaCandidates=[]; const cmCandidates=[];
+  const cmEvents=[]; const chamaCandidates=[]; const cmCandidates=[]; const cmTradingDates=new Set();
   for(const q of cmPool){
     try{
-      const h=await fetchHistory(q.code,700);
+      const h=await loadHistory(q.code);
+      h.slice(-40).forEach(row=>{const d=String(row.t||'');if(/^\\d{8}$/.test(d))cmTradingDates.add(d);});
       const cm=cmMatches(h,cfg);
       cm.forEach(e=>cmEvents.push({...q,...e}));
     }catch(e){}
@@ -368,7 +374,7 @@ async function screenMarket(market,top,rawCfg){
 
   for(const q of chamaTargets){
     try{
-      const h=await fetchHistory(q.code,700);
+      const h=await loadHistory(q.code);
       const a=analyze(q,h,cfg);
       if(a?.chama)chamaCandidates.push({...q,...a});
     }catch(e){}
@@ -380,6 +386,47 @@ async function screenMarket(market,top,rawCfg){
   chamaCandidates.sort((a,b)=>b.score-a.score);
   cmCandidates.sort((a,b)=>String(b.selectedDate).localeCompare(String(a.selectedDate))||((b.changePct||0)-(a.changePct||0)));
 
+
+  // Shared leader TOP10: both menus consume the same trade-value-ranked market leaders.
+  const leaderTop10=[...merged]
+    .filter(x=>Number(x.value||0)>0)
+    .sort((a,b)=>Number(b.value||0)-Number(a.value||0)||Number(b.changePct||0)-Number(a.changePct||0))
+    .slice(0,10)
+    .map((x,i)=>({...x,leaderRank:i+1}));
+  const tradeValueLeader=leaderTop10[0]||null;
+  const riseLeader=[...leaderTop10].sort((a,b)=>Number(b.changePct||0)-Number(a.changePct||0))[0]||null;
+  const seoulParts=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
+  const seoulClock=Number(seoulParts.find(x=>x.type==='hour')?.value||0)*60+Number(seoulParts.find(x=>x.type==='minute')?.value||0);
+  const closeTradeMin=seoulClock>=14*60+30?50000000000:100000000000;
+  const closeCandidates=[];
+  for(const leader of leaderTop10){
+    try{
+      const h=await loadHistory(leader.code);
+      const rows=(h||[]).filter(x=>Number.isFinite(Number(x.close))&&Number(x.close)>0).sort((a,b)=>String(a.t).localeCompare(String(b.t)));
+      const latest=rows.at(-1), previous=rows.at(-2);
+      const marketCap=Number(leader.marketValue);
+      const tradeValue=Number(leader.value);
+      const changePct=Number(leader.changePct);
+      const gapPct=latest?.open!=null&&previous?.close?((Number(latest.open)/Number(previous.close))-1)*100:null;
+      const prior252=rows.slice(-253,-1);
+      const oneYearHigh=prior252.length>=200?Math.max(...prior252.map(x=>Number(x.high)||Number(x.close)||0)):null;
+      const isOneYearHigh=oneYearHigh!=null&&Number(leader.price)>=oneYearHigh;
+      const capPass=Number.isFinite(marketCap)&&marketCap>=200000000000;
+      const tradePass=Number.isFinite(tradeValue)&&tradeValue>=closeTradeMin;
+      const gapPass=gapPct!=null&&gapPct<7;
+      const riseThreshold=marketCap<5000000000000?10:5;
+      const risePass=Number.isFinite(changePct)&&changePct>=riseThreshold;
+      const highPass=isOneYearHigh===true;
+      const conditions={marketCap:capPass,tradeValue:tradePass,openingGap:gapPass,rise:risePass,oneYearHigh:highPass};
+      const conditionCount=Object.values(conditions).filter(Boolean).length;
+      const preferred=leader.leaderRank<=3&&leader.code===tradeValueLeader?.code&&leader.code===riseLeader?.code;
+      const qualifies=capPass&&tradePass&&(preferred?conditionCount>=4:conditionCount===5);
+      if(qualifies)closeCandidates.push({...leader,marketCapKRW:marketCap,tradeValueKRW:tradeValue,gapPct,oneYearHighPrice:oneYearHigh,oneYearHigh:isOneYearHigh,conditions,conditionCount,preferred,closeCandidate:true,tradeValueThresholdKRW:closeTradeMin,riseThresholdPct:riseThreshold});
+    }catch(e){}
+  }
+  closeCandidates.sort((a,b)=>Number(b.preferred)-Number(a.preferred)||Number(b.conditionCount)-Number(a.conditionCount)||Number(b.value||0)-Number(a.value||0));
+  closeCandidates.forEach((x,i)=>x.closeCandidateRank=i+1);
+
   const today=new Date();today.setHours(0,0,0,0);
   const since=new Date(today.getTime()-(cfg.calendarDays-1)*86400000);
   const calendar={};
@@ -388,8 +435,15 @@ async function screenMarket(market,top,rawCfg){
     if(d>today||d<since)continue;
     (calendar[e.selectedDate]??=[]).push({code:e.code,name:e.name,selectedDate:e.selectedDate,day0Date:e.day0Date,achievementRisePct:e.achievementRisePct,achievementCandlePct:e.achievementCandlePct});
   }
+  const todayKey=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()).replace(/-/g,'');
+  cmTradingDates.add(todayKey);
+  const historySince=new Date(Date.now()-30*86400000);
+  const cmHistoryDates=[...cmTradingDates].filter(d=>/^\\d{8}$/.test(d)&&new Date(d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)+'T00:00:00')>=historySince).sort();
 
   return {
+    leaderTop10,
+    closeCandidates,
+    cmHistoryDates,
     universeCount:universe.length,
     universeSourceErrors:universeResult.errors?.slice(0,8)||[],
     quoteCount:Object.keys(quotes).length,
@@ -405,6 +459,71 @@ async function screenMarket(market,top,rawCfg){
     config:cfg,
     method:'전체시장→ETF/ETN/스팩/SPAC 제외→전체시장 당일 스냅샷+실시간 보강→거래대금 조건→당일 상승률 Top100→0일차→5거래일 50%→달성일 +10% 양봉/20일 전고점 돌파; 차마존=EMA5/10/20/60/120 필수근접+추가조건 2개 이상'
   };
+}
+
+
+function seoulDateKey(date=new Date()){
+  const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date);
+  const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));
+  return `${p.year}${p.month}${p.day}`;
+}
+function validHistoryDate(value){
+  const d=String(value||'').replace(/-/g,'');
+  if(!/^\\d{8}$/.test(d))return null;
+  const dt=new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T00:00:00Z`);
+  return Number.isNaN(dt.getTime())?null:d;
+}
+async function writeSelectionDay(db,date,strategy,items,scannedAt){
+  const now=isoNow();
+  const rows=Array.isArray(items)?items:[];
+  const statements=[
+    db.prepare('DELETE FROM screener_selection_items WHERE selection_date=? AND strategy=?').bind(date,strategy),
+    db.prepare(`INSERT INTO screener_selection_runs(selection_date,strategy,selected_count,scanned_at,captured_at)
+      VALUES(?,?,?,?,?) ON CONFLICT(selection_date,strategy) DO UPDATE SET
+      selected_count=excluded.selected_count,scanned_at=excluded.scanned_at,captured_at=excluded.captured_at`)
+      .bind(date,strategy,rows.length,scannedAt||now,now)
+  ];
+  rows.forEach((item,index)=>{
+    const code=normalizeStockCode(item.code);
+    if(!isValidStockCode(code))return;
+    statements.push(db.prepare(`INSERT INTO screener_selection_items(selection_date,strategy,code,name,rank,details_json,captured_at)
+      VALUES(?,?,?,?,?,?,?)`).bind(date,strategy,code,String(item.name||''),Number(item.closeCandidateRank||item.leaderRank||item.rank||index+1),JSON.stringify(item),now));
+  });
+  await d1Batch(db,statements,80);
+  return rows.length;
+}
+async function persistScreenerHistory(env,result){
+  if(!env.DB)return {saved:false,reason:'D1 binding(DB)이 없어 이력 저장을 건너뛰었습니다.'};
+  const db=requireDb(env),date=seoulDateKey(),scannedAt=result.scannedAt||isoNow();
+  const counts={};
+  counts.close=await writeSelectionDay(db,date,'close',result.closeCandidates||[],scannedAt);
+  counts.chama=await writeSelectionDay(db,date,'chama',result.chamaCandidates||[],scannedAt);
+  const cmDates=(result.cmHistoryDates||[date]).map(validHistoryDate).filter(Boolean);
+  const uniqueDates=[...new Set([...cmDates,date])].sort();
+  const cmByDate=result.calendar||{};
+  for(const d of uniqueDates)counts.cm=(counts.cm||0)+await writeSelectionDay(db,d,'cm',cmByDate[d]||[],scannedAt);
+  return {saved:true,date,counts,cmDays:uniqueDates.length};
+}
+async function readScreenerHistory(env,url){
+  const db=requireDb(env);
+  const strategy=String(url.searchParams.get('strategy')||'').toLowerCase();
+  if(!['close','chama','cm'].includes(strategy))throw new Error('strategy는 close, chama, cm 중 하나여야 합니다.');
+  const days=Math.min(31,Math.max(1,Number(url.searchParams.get('days')||31)));
+  const today=seoulDateKey();
+  const startDate=new Date(Date.now()-(days-1)*86400000);
+  const startKey=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(startDate).replace(/-/g,'');
+  const runResult=await db.prepare(`SELECT selection_date AS date,selected_count AS count,scanned_at AS scannedAt,captured_at AS capturedAt
+    FROM screener_selection_runs WHERE strategy=? AND selection_date>=? AND selection_date<=?
+    ORDER BY selection_date DESC LIMIT ?`).bind(strategy,startKey,today,days).all();
+  const date=validHistoryDate(url.searchParams.get('date')||'');
+  let items=[];
+  if(date){
+    const itemResult=await db.prepare(`SELECT code,name,rank,details_json AS detailsJson
+      FROM screener_selection_items WHERE strategy=? AND selection_date=?
+      ORDER BY rank ASC,code ASC LIMIT 500`).bind(strategy,date).all();
+    items=(itemResult.results||[]).map(x=>({...x,details:(()=>{try{return JSON.parse(x.detailsJson||'{}')}catch(e){return null}})()}));
+  }
+  return {ok:true,strategy,days,startDate:startKey,today,dates:runResult.results||[],selectedDate:date,items,storage:'CLOUDFLARE_D1',note:'과거 데이터는 실제 스캔/일봉에서 확인되어 저장된 날짜만 반환합니다. 저장 이전 날짜를 임의로 0건 처리하지 않습니다.'};
 }
 
 async function getQuotes(codes){const n=await fetchNaver(codes);return codes.map(code=>n[code]||{code,source:'ERROR'});}
@@ -1691,6 +1810,7 @@ export default {async fetch(request,env){const url=new URL(request.url);if(reque
   if(url.pathname==='/api/themes'){try{return json(await readThemes(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/themes/stocks'){try{return json(await readThemeStocks(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/materials'){try{return json(await readMaterials(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
+  if(url.pathname==='/api/screener/history'){try{return json(await readScreenerHistory(env,url),request);}catch(e){return json({ok:false,error:e.message},request,503);}}
   if(url.pathname==='/api/data/status'){try{return json({ok:true,...await dataStatus(env)},request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/universe/validate'){try{return json(await validateUniverseMaster(env,url),request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   if(url.pathname==='/api/data/coverage'){try{return json(await dataCoverage(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
@@ -1699,7 +1819,7 @@ export default {async fetch(request,env){const url=new URL(request.url);if(reque
   if(['/api/data/quote','/api/data/candles','/api/data/indicators'].includes(url.pathname)){try{return json(await dataRead(env,url,url.pathname),request);}catch(e){return json({ok:false,error:e.message},request,400);}}
   if(url.pathname==='/api/kis/test'){try{const q=await kisQuote(env,url.searchParams.get('code')||'005930');return json({ok:true,authenticated:true,quote:q,mode:env.KIS_MODE||'paper'},request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   const isMarket=['/api/market','/api/market/'].includes(url.pathname), isAnalysis=['/api/analysis','/api/analysis/'].includes(url.pathname), isScreen=['/api/screener','/api/screener/'].includes(url.pathname); if(!isMarket&&!isAnalysis&&!isScreen)return json({ok:false,error:'Not Found'},request,404);
-  if(isScreen){const market=(url.searchParams.get('market')||'ALL').toUpperCase();const top=Math.min(10,Math.max(1,Number(url.searchParams.get('top')||10)));let cfg={};const raw=url.searchParams.get('config');if(raw){try{cfg=JSON.parse(decodeURIComponent(raw));}catch(e){return json({ok:false,error:'config JSON 형식 오류'},request,400);}}try{return json({ok:true,...await screenMarket(market,top,cfg)},request);}catch(e){return json({ok:false,error:e?.message||String(e)},request,502);}}
+  if(isScreen){const market=(url.searchParams.get('market')||'ALL').toUpperCase();const top=Math.min(10,Math.max(1,Number(url.searchParams.get('top')||10)));let cfg={};const raw=url.searchParams.get('config');if(raw){try{cfg=JSON.parse(decodeURIComponent(raw));}catch(e){return json({ok:false,error:'config JSON 형식 오류'},request,400);}}try{const result=await screenMarket(market,top,cfg);let historySave;try{historySave=await persistScreenerHistory(env,result);}catch(historyError){historySave={saved:false,error:historyError?.message||String(historyError)};}return json({ok:true,...result,historySave},request);}catch(e){return json({ok:false,error:e?.message||String(e)},request,502);}}
   const codes=[...new Set((url.searchParams.get('codes')||'').split(',').map(normalizeStockCode).filter(isValidStockCode))];if(!codes.length)return json({ok:false,error:'codes parameter is required'},request,400);if(codes.length>80)return json({ok:false,error:'Too many codes'},request,400);
   if(isAnalysis)return json({ok:true,quotes:await getAnalysis(codes),time:new Date().toISOString(),note:'Naver realtime + Naver daily chart; 기술분석은 재현 가능한 지표 기반입니다.'},request);
   return json({ok:true,quotes:await getQuotes(codes),time:new Date().toISOString()},request);
