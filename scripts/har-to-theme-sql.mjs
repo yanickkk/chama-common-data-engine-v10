@@ -24,7 +24,7 @@ const sql = v => v == null ? 'NULL' : "'" + String(v).replaceAll("'", "''") + "'
 const asText = v => typeof v === 'string' ? v : JSON.stringify(v);
 const sha = v => crypto.createHash('sha256').update(asText(v)).digest('hex');
 const dateFrom = row => {
-  for (const x of [row?.date, row?.base_date, row?.data_date, row?.trade_date, row?.ymd, row?.week_start, row?.start_date]) {
+  for (const x of [row?.date, row?.baseDate, row?.base_date, row?.data_date, row?.trade_date, row?.ymd, row?.week_start, row?.start_date]) {
     if (typeof x !== 'string') continue;
     const m = x.match(/(20[0-9]{2})[-.]?([0-9]{2})[-.]?([0-9]{2})/);
     if (m) return m[1] + '-' + m[2] + '-' + m[3];
