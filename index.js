@@ -614,15 +614,73 @@ async function saveCandles(db,code,rows) {
     unchanged
   };
 }
-async function saveIndicators(db,code,rows) {
-  // 값이 실제로 달라진 날짜만 UPDATE합니다. 동일한 지표를 재계산해도 D1 row write가 발생하지 않습니다.
-  const stmts=rows.map(x=>db.prepare(`INSERT INTO stock_indicators(code,date,ema5,ema10,ema20,ema60,ema120,rsi14,macd,macd_signal,macd_hist,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code,date) DO UPDATE SET ema5=excluded.ema5,ema10=excluded.ema10,ema20=excluded.ema20,ema60=excluded.ema60,ema120=excluded.ema120,rsi14=excluded.rsi14,macd=excluded.macd,macd_signal=excluded.macd_signal,macd_hist=excluded.macd_hist,updated_at=excluded.updated_at WHERE stock_indicators.ema5 IS NOT excluded.ema5 OR stock_indicators.ema10 IS NOT excluded.ema10 OR stock_indicators.ema20 IS NOT excluded.ema20 OR stock_indicators.ema60 IS NOT excluded.ema60 OR stock_indicators.ema120 IS NOT excluded.ema120 OR stock_indicators.rsi14 IS NOT excluded.rsi14 OR stock_indicators.macd IS NOT excluded.macd OR stock_indicators.macd_signal IS NOT excluded.macd_signal OR stock_indicators.macd_hist IS NOT excluded.macd_hist`).bind(code,x.date,x.ema5,x.ema10,x.ema20,x.ema60,x.ema120,x.rsi14,x.macd,x.macdSignal,x.macdHist,isoNow()));
+async function saveIndicators(db,code,rows,refreshTimestamp=false) {
+  const changedOnly=refreshTimestamp?'':` WHERE stock_indicators.ema5 IS NOT excluded.ema5 OR stock_indicators.ema10 IS NOT excluded.ema10 OR stock_indicators.ema20 IS NOT excluded.ema20 OR stock_indicators.ema60 IS NOT excluded.ema60 OR stock_indicators.ema120 IS NOT excluded.ema120 OR stock_indicators.rsi14 IS NOT excluded.rsi14 OR stock_indicators.macd IS NOT excluded.macd OR stock_indicators.macd_signal IS NOT excluded.macd_signal OR stock_indicators.macd_hist IS NOT excluded.macd_hist`;
+  const stmts=rows.map(x=>db.prepare(`INSERT INTO stock_indicators(code,date,ema5,ema10,ema20,ema60,ema120,rsi14,macd,macd_signal,macd_hist,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code,date) DO UPDATE SET ema5=excluded.ema5,ema10=excluded.ema10,ema20=excluded.ema20,ema60=excluded.ema60,ema120=excluded.ema120,rsi14=excluded.rsi14,macd=excluded.macd,macd_signal=excluded.macd_signal,macd_hist=excluded.macd_hist,updated_at=excluded.updated_at${changedOnly}`).bind(code,x.date,x.ema5,x.ema10,x.ema20,x.ema60,x.ema120,x.rsi14,x.macd,x.macdSignal,x.macdHist,isoNow()));
   await d1Batch(db,stmts); return stmts.length;
 }
+
+/**
+ * Durable per-stock indicator recalculation state.
+ * The pending write is committed before chunked indicator writes begin.
+ */
+async function markIndicatorsPending(db,code) {
+  const now=isoNow();
+  await db.prepare(`
+    INSERT INTO indicator_sync_state(code,status,started_at,completed_at,last_error)
+    VALUES(?,'pending',?,NULL,NULL)
+    ON CONFLICT(code) DO UPDATE SET
+      status='pending',
+      started_at=excluded.started_at,
+      completed_at=NULL,
+      last_error=NULL
+  `).bind(code,now).run();
+}
+async function markIndicatorsCompleted(db,code) {
+  await db.prepare(`
+    UPDATE indicator_sync_state
+    SET status='completed',completed_at=?,last_error=NULL
+    WHERE code=?
+  `).bind(isoNow(),code).run();
+}
+async function markIndicatorsError(db,code,error) {
+  // Keep status='pending'; a diagnostic write must never clear the retry state.
+  await db.prepare(`
+    UPDATE indicator_sync_state
+    SET last_error=?
+    WHERE code=? AND status='pending'
+  `).bind(String(error?.message||error).slice(0,1000),code).run();
+}
+async function indicatorsArePending(db,code) {
+  const row=await db.prepare(`
+    SELECT 1 AS pending
+    FROM indicator_sync_state
+    WHERE code=? AND status='pending'
+    LIMIT 1
+  `).bind(code).first();
+  return !!row;
+}
+async function saveIndicatorsWithState(db,code,rows,refreshTimestamp=false) {
+  // If this write fails, do not start indicator batches.
+  await markIndicatorsPending(db,code);
+  try {
+    const saved=await saveIndicators(db,code,rows,refreshTimestamp);
+    // Only complete after every saveIndicators batch has succeeded.
+    await markIndicatorsCompleted(db,code);
+    return saved;
+  } catch(error) {
+    try { await markIndicatorsError(db,code,error); } catch (_) {}
+    throw error;
+  }
+}
+
 async function dataStatus(env) {
   const db=env.DB; if(!db)return {dbConfigured:false,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'};
-  const [s,q,c,i]=await Promise.all(['stocks','stock_quotes','stock_daily_candles','stock_indicators'].map(t=>db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).first()));
-  return {dbConfigured:true,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper',counts:{stocks:s?.n||0,quotes:q?.n||0,candles:c?.n||0,indicators:i?.n||0}};
+  const [s,q,c,i,pending,completed]=await Promise.all(['stocks','stock_quotes','stock_daily_candles','stock_indicators'].map(t=>db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).first()).concat([
+    db.prepare(`SELECT COUNT(*) AS n FROM indicator_sync_state WHERE status='pending'`).first(),
+    db.prepare(`SELECT COUNT(*) AS n FROM indicator_sync_state WHERE status='completed'`).first()
+  ]));
+  return {dbConfigured:true,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper',counts:{stocks:s?.n||0,quotes:q?.n||0,candles:c?.n||0,indicators:i?.n||0,indicatorsPending:pending?.n||0,indicatorsCompleted:completed?.n||0}};
 }
 // Read-only stock master validation. This endpoint never writes to D1.
 async function validateUniverseMaster(env, url) {
@@ -767,9 +825,19 @@ async function syncData(env,url) {
             WHERE d.code=s.code AND length(d.date)=8 AND d.close>0 AND ix.code IS NULL
           )
           OR EXISTS (
+            SELECT 1 FROM stock_daily_candles d
+            LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
+            WHERE d.code=s.code AND length(d.date)=8 AND d.close>0
+              AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
+          )
+          OR EXISTS (
             SELECT 1 FROM stock_indicators ix
             LEFT JOIN stock_daily_candles d ON d.code=ix.code AND d.date=ix.date
             WHERE ix.code=s.code AND d.code IS NULL
+          )
+          OR EXISTS (
+            SELECT 1 FROM indicator_sync_state st
+            WHERE st.code=s.code AND st.status='pending'
           )
         )
       ORDER BY s.code LIMIT ?
@@ -785,7 +853,7 @@ async function syncData(env,url) {
         if(validCount<minCandles){skipped++;continue;}
         const rows=calculateIndicatorRows(stock.code,candles);
         if(rows.length<minCandles){skipped++;continue;}
-        saved+=await saveIndicators(db,stock.code,rows);
+        saved+=await saveIndicatorsWithState(db,stock.code,rows,true);
         processed++;if(rows.length<250)limitedHistory++;
       }catch(e){errors.push({code:stock.code,name:stock.name,error:e.message});}
     }
@@ -843,7 +911,24 @@ async function syncData(env,url) {
         unchanged+=writeResult.unchanged;
 
         // 일봉에 신규/수정이 있을 때만 해당 종목의 전체 지표를 다시 계산합니다.
-        if((writeResult.inserted+writeResult.updated)>0){
+        let indicatorsPending=await indicatorsArePending(db,s.code);
+        if((writeResult.inserted+writeResult.updated)===0){
+          try{
+            const pendingResult=await db.prepare(`
+              SELECT 1 AS pending
+              FROM stock_daily_candles d
+              LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
+              WHERE d.code=? AND length(d.date)=8 AND d.close>0
+                AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
+              LIMIT 1
+            `).bind(s.code).all();
+            indicatorsPending=indicatorsPending||(pendingResult.results||[]).length>0;
+          }catch(e){
+            indicatorErrors.push({code:s.code,error:`지표 재시도 확인 실패: ${e.message}`});
+          }
+        }
+
+        if((writeResult.inserted+writeResult.updated)>0||indicatorsPending){
           try{
             const candleResult=await db.prepare(
               'SELECT date,open,high,low,close,volume FROM stock_daily_candles WHERE code=? ORDER BY date ASC'
@@ -862,7 +947,7 @@ async function syncData(env,url) {
               if(indicatorRows.length<minCandles){
                 indicatorStocksSkipped++;
               }else{
-                await saveIndicators(db,s.code,indicatorRows);
+                await saveIndicatorsWithState(db,s.code,indicatorRows,true);
                 indicatorStocksRecalculated++;
                 indicatorRowsProcessed+=indicatorRows.length;
               }
@@ -920,7 +1005,7 @@ async function syncData(env,url) {
         if(validCount<minCandles){skipped++;continue;}
         const rows=calculateIndicatorRows(s.code,candles);
         if(rows.length<minCandles){skipped++;continue;}
-        saved+=await saveIndicators(db,s.code,rows);
+        saved+=await saveIndicatorsWithState(db,s.code,rows);
         processed++; if(rows.length<250)limitedHistory++;
       }catch(e){errors.push({code:s.code,error:e.message});}
     }
