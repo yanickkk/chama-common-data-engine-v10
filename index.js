@@ -845,7 +845,7 @@ async function syncData(env,url) {
           )
         )
       ORDER BY CASE WHEN s.code>? THEN 0 ELSE 1 END, s.code LIMIT ?
-    `).bind(afterCode,afterCode,minCandles,afterCode,limit).all();
+    `).bind(afterCode,minCandles,afterCode,limit).all();
     const stocks=selected.results||[];
     if(!stocks.length)return {ok:true,type,done:true,afterCode,minCandles,processed:0,indicatorRowsSaved:0,failed:0,nextCode:null,message:'복구 대상 종목이 없습니다.',at:isoNow()};
     let processed=0,saved=0,skipped=0,limitedHistory=0;const errors=[];
