@@ -389,7 +389,7 @@ async function screenMarket(market,top,rawCfg){
 
   // Shared leader TOP10: both menus consume the same trade-value-ranked market leaders.
   const leaderTop10=[...merged]
-    .filter(x=>Number(x.value||0)>0)
+    .filter(x=>x.price!=null&&Number(x.value||0)>0)
     .sort((a,b)=>Number(b.value||0)-Number(a.value||0)||Number(b.changePct||0)-Number(a.changePct||0))
     .slice(0,10)
     .map((x,i)=>({...x,leaderRank:i+1}));
@@ -443,6 +443,7 @@ async function screenMarket(market,top,rawCfg){
   return {
     leaderTop10,
     closeCandidates,
+    chamaSelectionHistory:chamaCandidates,
     cmHistoryDates,
     universeCount:universe.length,
     universeSourceErrors:universeResult.errors?.slice(0,8)||[],
@@ -470,12 +471,16 @@ function seoulDateKey(date=new Date()){
 function validHistoryDate(value){
   const d=String(value||'').replace(/-/g,'');
   if(!/^\d{8}$/.test(d))return null;
-  const dt=new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T00:00:00Z`);
-  return Number.isNaN(dt.getTime())?null:d;
+  const iso=`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}`;
+  const dt=new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(dt.getTime())||dt.toISOString().slice(0,10)!==iso?null:d;
 }
 async function writeSelectionDay(db,date,strategy,items,scannedAt){
   const now=isoNow();
-  const rows=Array.isArray(items)?items:[];
+  const inputRows=Array.isArray(items)?items:[];
+  const byCode=new Map();
+  inputRows.forEach(item=>{const code=normalizeStockCode(item?.code);if(isValidStockCode(code))byCode.set(code,item);});
+  const rows=[...byCode.values()];
   const statements=[
     db.prepare('DELETE FROM screener_selection_items WHERE selection_date=? AND strategy=?').bind(date,strategy),
     db.prepare(`INSERT INTO screener_selection_runs(selection_date,strategy,selected_count,scanned_at,captured_at)
@@ -497,7 +502,7 @@ async function persistScreenerHistory(env,result){
   const db=requireDb(env),date=seoulDateKey(),scannedAt=result.scannedAt||isoNow();
   const counts={};
   counts.close=await writeSelectionDay(db,date,'close',result.closeCandidates||[],scannedAt);
-  counts.chama=await writeSelectionDay(db,date,'chama',result.chamaCandidates||[],scannedAt);
+  counts.chama=await writeSelectionDay(db,date,'chama',result.chamaSelectionHistory||result.chamaCandidates||[],scannedAt);
   const cmDates=(result.cmHistoryDates||[date]).map(validHistoryDate).filter(Boolean);
   const uniqueDates=[...new Set([...cmDates,date])].sort();
   const cmByDate=result.calendar||{};
