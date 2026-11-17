@@ -360,7 +360,7 @@ async function screenMarket(market,top,rawCfg){
   for(const q of cmPool){
     try{
       const h=await loadHistory(q.code);
-      h.slice(-40).forEach(row=>{const d=String(row.t||'');if(/^\\d{8}$/.test(d))cmTradingDates.add(d);});
+      h.slice(-40).forEach(row=>{const d=String(row.t||'');if(/^\d{8}$/.test(d))cmTradingDates.add(d);});
       const cm=cmMatches(h,cfg);
       cm.forEach(e=>cmEvents.push({...q,...e}));
     }catch(e){}
@@ -409,7 +409,7 @@ async function screenMarket(market,top,rawCfg){
       const changePct=Number(leader.changePct);
       const gapPct=latest?.open!=null&&previous?.close?((Number(latest.open)/Number(previous.close))-1)*100:null;
       const prior252=rows.slice(-253,-1);
-      const oneYearHigh=prior252.length>=200?Math.max(...prior252.map(x=>Number(x.high)||Number(x.close)||0)):null;
+      const oneYearHigh=prior252.length>=252?Math.max(...prior252.map(x=>Number(x.high)||Number(x.close)||0)):null;
       const isOneYearHigh=oneYearHigh!=null&&Number(leader.price)>=oneYearHigh;
       const capPass=Number.isFinite(marketCap)&&marketCap>=200000000000;
       const tradePass=Number.isFinite(tradeValue)&&tradeValue>=closeTradeMin;
@@ -438,7 +438,7 @@ async function screenMarket(market,top,rawCfg){
   const todayKey=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()).replace(/-/g,'');
   cmTradingDates.add(todayKey);
   const historySince=new Date(Date.now()-30*86400000);
-  const cmHistoryDates=[...cmTradingDates].filter(d=>/^\\d{8}$/.test(d)&&new Date(d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)+'T00:00:00')>=historySince).sort();
+  const cmHistoryDates=[...cmTradingDates].filter(d=>/^\d{8}$/.test(d)&&new Date(d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)+'T00:00:00')>=historySince).sort();
 
   return {
     leaderTop10,
@@ -469,7 +469,7 @@ function seoulDateKey(date=new Date()){
 }
 function validHistoryDate(value){
   const d=String(value||'').replace(/-/g,'');
-  if(!/^\\d{8}$/.test(d))return null;
+  if(!/^\d{8}$/.test(d))return null;
   const dt=new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T00:00:00Z`);
   return Number.isNaN(dt.getTime())?null:d;
 }
