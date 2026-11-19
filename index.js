@@ -926,7 +926,7 @@ async function syncData(env,url) {
   if(requestedCode!==null){
     const target=normalizeStockCode(requestedCode);
     if(!isValidStockCode(target))throw new Error('유효한 6자리 상장 종목 code가 필요합니다. 000000은 사용할 수 없습니다.');
-    const selected=await db.prepare('SELECT code,name,market FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code=?').bind(target).all();
+    const selected=await db.prepare("SELECT code,name,market FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code=?").bind(target).all();
     stocks=selected.results||[];
   } else {
     const selected=await db.prepare(`SELECT code,name,market FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code<>'000000' ORDER BY code LIMIT ? OFFSET ?`).bind(limit,offset).all();
@@ -1168,9 +1168,9 @@ async function dataCoverage(env) {
   const quotes=await db.prepare("SELECT COUNT(*) AS n FROM stocks s INNER JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'").first();
   const candle=await db.prepare("SELECT COUNT(DISTINCT d.code) AS n, COUNT(*) AS rows FROM stock_daily_candles d INNER JOIN stocks s ON s.code=d.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')").first();
   const indicator=await db.prepare("SELECT COUNT(DISTINCT d.code) AS n, COUNT(*) AS rows FROM stock_indicators d INNER JOIN stocks s ON s.code=d.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')").first();
-  const missingQuotes=await db.prepare('SELECT s.code,s.name FROM stocks s LEFT JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>\'000000\' AND q.code IS NULL ORDER BY s.code LIMIT 20').all();
-  const missingCandles=await db.prepare('SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_daily_candles) c ON c.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>\'000000\' AND c.code IS NULL ORDER BY s.code LIMIT 20').all();
-  const missingIndicators=await db.prepare('SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_indicators) i ON i.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>\'000000\' AND i.code IS NULL ORDER BY s.code LIMIT 20').all();
+  const missingQuotes=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND q.code IS NULL ORDER BY s.code LIMIT 20").all();
+  const missingCandles=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_daily_candles) c ON c.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND c.code IS NULL ORDER BY s.code LIMIT 20").all();
+  const missingIndicators=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_indicators) i ON i.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND i.code IS NULL ORDER BY s.code LIMIT 20").all();
   const n=Number(total?.n||0), q=Number(quotes?.n||0), c=Number(candle?.n||0), i=Number(indicator?.n||0);
   return {ok:true,totalStocks:n,coverage:{quotes:{stocks:q,missing:Math.max(0,n-q),percent:n?Number((q/n*100).toFixed(2)):0},candles:{stocks:c,rows:Number(candle?.rows||0),missing:Math.max(0,n-c),percent:n?Number((c/n*100).toFixed(2)):0},indicators:{stocks:i,rows:Number(indicator?.rows||0),missing:Math.max(0,n-i),percent:n?Number((i/n*100).toFixed(2)):0}},missingSamples:{quotes:missingQuotes.results||[],candles:missingCandles.results||[],indicators:missingIndicators.results||[]},note:'누락 샘플은 각 항목 최대 20종목입니다.'};
 }
@@ -1258,7 +1258,7 @@ function isPreferredStockName(name) {
   return /우선주|우(?:B|C)?$/.test(normalized);
 }
 
-const NON_EQUITY_SECURITY_RE=/(ETF|ETN|ELW|스팩|SPAC|(?:리츠|REIT)$|이리츠코크렙|채권|국채|회사채|선물|펀드|투자신탁|수익증권)/i;
+const NON_EQUITY_SECURITY_RE=/(ETF|ETN|ELW|스팩|SPAC|기업인수목적|(?:리츠|REIT)$|이리츠코크렙|부동산투자회사|투자회사|채권|국채|회사채|선물|펀드|투자신탁|수익증권)/i;
 const SECURITY_TYPE_FIELDS=['securityType','securityTypeName','securityTypeCode','stockType','stockTypeName','stockTypeCode','itemType','itemTypeName','itemTypeCode','issueType','issueTypeName','securityKind','productType','stockKind','stockEndType','endType'];
 function classifySecurityType(item={},krx={},name='',source=''){
   const market=String(item.marketType??item.market??'').toUpperCase();
