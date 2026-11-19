@@ -325,6 +325,10 @@ async function screenMarket(market,top,rawCfg){
   const universeResult=await fetchUniverse(market);
   if(!universeResult.complete)throw new Error(`종목 유니버스 수집이 불완전합니다. pages=${universeResult.pages}, received=${universeResult.sourceItemCount}, expected=${universeResult.totalCount??'unknown'}; ${(universeResult.errors||[]).join(' | ')}`);
   const universe=universeResult.rows.filter(isEligibleCommonStock);
+  const commonStockCount=universe.filter(x=>x.securityType==='COMMON').length;
+  const preferredStockCount=universe.filter(x=>x.securityType==='PREFERRED').length;
+  const classificationUnverifiedCount=universeResult.rows.filter(x=>x.securityType==='UNVERIFIED').length;
+  const productExcludedCount=universeResult.rows.filter(x=>x.securityType==='EXCLUDED').length;
   if(!universe.length){ throw new Error('종목 유니버스를 가져오지 못했습니다. '+(universeResult.errors||[]).slice(0,3).join(' | ')); }
 
   // 유니버스 자체에 현재가/등락률/거래대금이 들어 있으면 그것을 1차 시장 스냅샷으로 사용합니다.
@@ -392,6 +396,7 @@ async function screenMarket(market,top,rawCfg){
 
   return {
     universeCount:universe.length,
+    commonStockCount,preferredStockCount,classificationUnverifiedCount,productExcludedCount,
     universeSourceErrors:universeResult.errors?.slice(0,8)||[],
     quoteCount:Object.keys(quotes).length,
     marketSnapshotCount:snapshotBefore,
@@ -402,9 +407,9 @@ async function screenMarket(market,top,rawCfg){
     cmCandidates:cmCandidates.slice(0,top),
     calendar,
     scannedAt:new Date().toISOString(),
-    workerVersion:'v9-market-snapshot-cm',
+    workerVersion:'v11.4-common-preferred-policy',
     config:cfg,
-    method:'전체시장→ETF/ETN/스팩/SPAC 제외→전체시장 당일 스냅샷+실시간 보강→거래대금 조건→당일 상승률 Top100→0일차→5거래일 50%→달성일 +10% 양봉/20일 전고점 돌파; 차마존=EMA5/10/20/60/120 필수근접+추가조건 2개 이상'
+    method:'검증된 코스피·코스닥 보통주+우선주만 포함(ETF/ETN/ELW/SPAC/리츠/펀드/채권 등 및 분류 미확인 제외)→전체시장 당일 스냅샷+실시간 보강→거래대금 조건→당일 상승률 Top100→0일차→5거래일 50%→달성일 +10% 양봉/20일 전고점 돌파; 차마존·CM 기존 판정 기준 유지'
   };
 }
 
