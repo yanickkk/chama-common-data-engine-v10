@@ -864,9 +864,13 @@ async function syncData(env,url) {
   const limit=Math.min(maxBatch,requestedLimit);
   if(type==='universe'){
     const market=(url.searchParams.get('market')||'ALL').toUpperCase(); const u=await fetchUniverse(market); if(!u.complete)throw new Error('종목 유니버스 페이지 수집이 불완전하여 D1 저장을 중단했습니다. '+(u.errors||[]).join(' | '));
-    if(market==='ALL')await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1").run();
-    else await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1 AND upper(market)=?").bind(market).run();
-    await db.prepare("DELETE FROM stocks WHERE code='000000'").run(); const saved=await saveUniverse(db,u.rows);
+    // 먼저 검증된 현재 유니버스를 모두 저장합니다. 저장 중 D1 오류가 나면
+    // 기존 활성 종목은 그대로 유지하고, 저장이 완전히 끝난 뒤에만 오래된 종목을 비활성화합니다.
+    const syncStartedAt=isoNow();
+    const saved=await saveUniverse(db,u.rows);
+    await db.prepare("DELETE FROM stocks WHERE code='000000'").run();
+    if(market==='ALL')await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1 AND security_verified=1 AND updated_at < ?").bind(syncStartedAt).run();
+    else await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1 AND security_verified=1 AND upper(market)=? AND updated_at < ?").bind(market,syncStartedAt).run();
     const commonStocks=u.rows.filter(x=>x.securityType==='COMMON'&&isEligibleCommonStock(x)).length;
     const preferredStocks=u.rows.filter(x=>x.securityType==='PREFERRED'&&isEligibleCommonStock(x)).length;
     const unverifiedExcluded=u.rows.filter(x=>x.securityType==='UNVERIFIED').length;
