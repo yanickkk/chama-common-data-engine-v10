@@ -719,7 +719,8 @@ async function saveCandles(db,code,rows) {
   return {
     inserted:toWrite.length-updated,
     updated,
-    unchanged
+    unchanged,
+    rowsRead:Number(existingResult.meta?.rows_read||0)
   };
 }
 async function saveIndicators(db,code,rows,refreshTimestamp=false) {
@@ -1008,7 +1009,7 @@ async function syncData(env,url) {
     const days=Math.min(2500,Math.max(120,Number(url.searchParams.get('days')||700)));
     const minCandles=Math.min(250,Math.max(120,Number(url.searchParams.get('minCandles')||120)));
     const provider='naver',errors=[],indicatorErrors=[];
-    let saved=0,updated=0,unchanged=0;
+    let saved=0,updated=0,unchanged=0,d1RowsRead=0;
     let indicatorStocksRecalculated=0,indicatorStocksSkipped=0;
     let indicatorStocksUnchanged=0,indicatorRowsProcessed=0;
     const diagnostics=[];
@@ -1032,6 +1033,7 @@ async function syncData(env,url) {
         }
 
         const writeResult=await saveCandles(db,s.code,rows);
+        d1RowsRead+=Number(writeResult.rowsRead||0);
         saved+=writeResult.inserted;
         updated+=writeResult.updated;
         unchanged+=writeResult.unchanged;
@@ -1048,6 +1050,7 @@ async function syncData(env,url) {
                 AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
               LIMIT 1
             `).bind(s.code).all();
+            d1RowsRead+=Number(pendingResult.meta?.rows_read||0);
             indicatorsPending=indicatorsPending||(pendingResult.results||[]).length>0;
           }catch(e){
             indicatorErrors.push({code:s.code,error:`지표 재시도 확인 실패: ${e.message}`});
@@ -1059,6 +1062,7 @@ async function syncData(env,url) {
             const candleResult=await db.prepare(
               'SELECT date,open,high,low,close,volume FROM stock_daily_candles WHERE code=? ORDER BY date ASC'
             ).bind(s.code).all();
+            d1RowsRead+=Number(candleResult.meta?.rows_read||0);
 
             const candles=candleResult.results||[];
             const validCount=candles.filter(
@@ -1108,6 +1112,7 @@ async function syncData(env,url) {
       indicatorStocksSkipped,
       indicatorStocksUnchanged,
       indicatorRowsProcessed,
+      d1RowsRead,
       indicatorFailed:indicatorErrors.length,
       indicatorErrors:indicatorErrors.slice(0,20),
       failed:errors.length,
@@ -1176,6 +1181,7 @@ async function historySyncJob(env,url) {
     `).bind(runId,now).run();
     const queuedCount=Number(queued.meta?.changes||0);
     const initialReserve=queuedCount+100;
+    const queueBuildRowsRead=Number(queued.meta?.rows_read||0);
     await db.prepare(`
       INSERT INTO history_sync_job(job_id,status,run_id,after_code,phase,processed,failed,candles_inserted,candles_updated,
         indicators_recalculated,indicator_rows_processed,day_key,daily_reserved_writes,daily_budget_writes,
@@ -1186,7 +1192,7 @@ async function historySyncJob(env,url) {
         day_key=excluded.day_key,daily_reserved_writes=excluded.daily_reserved_writes,daily_budget_writes=excluded.daily_budget_writes,
         reserve_per_stock=excluded.reserve_per_stock,last_error=NULL,started_at=excluded.started_at,updated_at=excluded.updated_at
     `).bind(jobId,runId,dayKey,initialReserve,dailyBudget,reservePerStock,now,now).run();
-    return {ok:true,action,status:'running',runId,queuedCount,initialReservedWrites:initialReserve,message:'60~119거래일 종목을 먼저, 0~59거래일 종목을 다음으로 처리하도록 작업 목록을 만들었습니다.',dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
+    return {ok:true,action,status:'running',runId,queuedCount,initialReservedWrites:initialReserve,queueBuildRowsRead,message:'60~119거래일 종목을 먼저, 0~59거래일 종목을 다음으로 처리하도록 작업 목록을 만들었습니다.',dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
   }
   if(!job) throw new Error('작업 상태가 없습니다. action=start로 먼저 시작하세요.');
   if(action==='pause') {
@@ -1257,7 +1263,7 @@ async function historySyncJob(env,url) {
     ]);
     const latest=await getJob();
     return {ok:true,action,status:'running',phase:latest.phase,code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
-      candleResult:result,progress:{processed:latest.processed,afterCode:latest.after_code,
+      candleResult:result,d1RowsRead:Number(result.d1RowsRead||0),progress:{processed:latest.processed,afterCode:latest.after_code,
       candlesInserted:latest.candles_inserted,candlesUpdated:latest.candles_updated,
       indicatorsRecalculated:latest.indicators_recalculated,indicatorRowsProcessed:latest.indicator_rows_processed,
       dailyReservedWrites:latest.daily_reserved_writes,dailyBudgetWrites:latest.daily_budget_writes},
