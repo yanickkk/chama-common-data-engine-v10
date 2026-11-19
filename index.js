@@ -650,12 +650,8 @@ async function saveQuotes(db,rows) {
   await d1Batch(db,stmts); return stmts.length;
 }
 async function saveCandles(db,code,rows) {
-  // 모든 날짜를 NAVER 원본과 비교하고 실제 변경된 행만 갱신합니다.
-  const existingResult=await db.prepare('SELECT date,open,high,low,close,volume,trade_value,source FROM stock_daily_candles WHERE code=?').bind(code).all();
-  const existingRows=existingResult.results||[];
-  const existing=new Map(existingRows.map(x=>[String(x.date),x]));
+  // 원본에서 받은 날짜 구간만 비교합니다. 과거에 더 긴 이력이 있어도 불필요한 행을 읽지 않습니다.
   const byDate=new Map();
-
   for(const x of rows||[]){
     const date=String(x.date||'');
     const validDate=date.length===8 && [...date].every(ch=>ch>='0'&&ch<='9');
@@ -663,6 +659,14 @@ async function saveCandles(db,code,rows) {
       byDate.set(date,x);
     }
   }
+  if(!byDate.size)return {inserted:0,updated:0,unchanged:0,rowsRead:0};
+  const dates=[...byDate.keys()].sort();
+  const minDate=dates[0],maxDate=dates[dates.length-1];
+  const existingResult=await db.prepare(
+    'SELECT date,open,high,low,close,volume,trade_value,source FROM stock_daily_candles WHERE code=? AND date>=? AND date<=?'
+  ).bind(code,minDate,maxDate).all();
+  const existingRows=existingResult.results||[];
+  const existing=new Map(existingRows.map(x=>[String(x.date),x]));
 
   const toWrite=[];
   let unchanged=0,updated=0;
