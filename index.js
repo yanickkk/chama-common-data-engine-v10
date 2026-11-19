@@ -483,6 +483,7 @@ async function ensureSecuritySchema(db){
     await db.prepare(`CREATE TABLE IF NOT EXISTS history_sync_queue (
       run_id TEXT NOT NULL,
       code TEXT NOT NULL,
+      name TEXT NOT NULL,
       phase INTEGER NOT NULL,
       initial_candle_count INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL CHECK(status IN ('pending','completed')),
@@ -1158,8 +1159,8 @@ async function historySyncJob(env,url) {
     if(job?.status==='running') throw new Error('이미 실행 중인 작업이 있습니다. 먼저 pause 하거나 status를 확인하세요.');
     const runId=crypto.randomUUID();
     const queued=await db.prepare(`
-      INSERT INTO history_sync_queue(run_id,code,phase,initial_candle_count,status,updated_at)
-      SELECT ?,s.code,CASE WHEN COALESCE(c.candle_count,0)>=60 THEN 0 ELSE 1 END,
+      INSERT INTO history_sync_queue(run_id,code,name,phase,initial_candle_count,status,updated_at)
+      SELECT ?,s.code,s.name,CASE WHEN COALESCE(c.candle_count,0)>=60 THEN 0 ELSE 1 END,
         COALESCE(c.candle_count,0),'pending',?
       FROM stocks s
       LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
@@ -1210,12 +1211,12 @@ async function historySyncJob(env,url) {
     return {ok:true,action,status:'budget_wait',afterCode:job.after_code,processed:job.processed,dailyReservedWrites:reserved,dailyBudgetWrites:budget,reservePerStock:reserve,message:'일일 안전 예산에 도달했습니다. UTC 날짜가 바뀐 뒤 resume 하세요.',at:now};
   }
 
-  let selected=await db.prepare("SELECT code,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=? AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id,Number(job.phase)||0).first();
+  let selected=await db.prepare("SELECT code,name,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=? AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id,Number(job.phase)||0).first();
 
   if(!selected && Number(job.phase)===0) {
     await db.prepare("UPDATE history_sync_job SET phase=1,after_code='',updated_at=? WHERE job_id=?").bind(isoNow(),jobId).run();
     job=await getJob();
-    selected=await db.prepare("SELECT code,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=1 AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id).first();
+    selected=await db.prepare("SELECT code,name,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=1 AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id).first();
   }
 
   if(!selected) {
