@@ -453,10 +453,23 @@ async function ensureSecuritySchema(db){
   securitySchemaPromise=(async()=>{
     const info=await db.prepare('PRAGMA table_info(stocks)').all();
     const cols=new Set((info.results||[]).map(x=>String(x.name)));
-    if(!cols.has('security_type'))await db.prepare("ALTER TABLE stocks ADD COLUMN security_type TEXT NOT NULL DEFAULT 'UNVERIFIED'").run();
-    if(!cols.has('security_verified'))await db.prepare('ALTER TABLE stocks ADD COLUMN security_verified INTEGER NOT NULL DEFAULT 0').run();
-    if(!cols.has('security_source'))await db.prepare("ALTER TABLE stocks ADD COLUMN security_source TEXT NOT NULL DEFAULT ''").run();
-    if(!cols.has('security_reason'))await db.prepare("ALTER TABLE stocks ADD COLUMN security_reason TEXT NOT NULL DEFAULT '기존 데이터 분류 미확인'").run();
+    const definitions=[
+      ['security_type',"ALTER TABLE stocks ADD COLUMN security_type TEXT NOT NULL DEFAULT 'UNVERIFIED'"],
+      ['security_verified',"ALTER TABLE stocks ADD COLUMN security_verified INTEGER NOT NULL DEFAULT 0"],
+      ['security_source',"ALTER TABLE stocks ADD COLUMN security_source TEXT NOT NULL DEFAULT ''"],
+      ['security_reason',"ALTER TABLE stocks ADD COLUMN security_reason TEXT NOT NULL DEFAULT '기존 데이터 분류 미확인'"]
+    ];
+    for(const [name,sql] of definitions){
+      if(cols.has(name))continue;
+      try{await db.prepare(sql).run();cols.add(name);}
+      catch(error){
+        // 여러 Worker isolate가 첫 요청에서 동시에 마이그레이션해도 중복 컬럼 오류는 안전하게 처리합니다.
+        const fresh=await db.prepare('PRAGMA table_info(stocks)').all();
+        const freshCols=new Set((fresh.results||[]).map(x=>String(x.name)));
+        if(!freshCols.has(name))throw error;
+        cols.add(name);
+      }
+    }
     securitySchemaReady=true;
   })().catch(e=>{securitySchemaPromise=null;throw e;});
   return securitySchemaPromise;
