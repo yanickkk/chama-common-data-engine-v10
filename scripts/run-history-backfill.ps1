@@ -18,7 +18,7 @@ Write-Host "이번 실행 최대 종목 수: $MaxSteps"
 Write-Host ""
 $state = Invoke-HistoryJob "status"
 $processedNow = if ($state.job) { $state.job.processed } else { 0 }
-Write-Host ("현재 상태: {0} / 처리 종목: {1} / 120일 미만 잔여: {2}" -f $state.status, $processedNow, $state.remainingUnder120)
+Write-Host ("현재 상태: {0} / 처리 종목: {1} / 대기열 잔여: {2}" -f $state.status, $processedNow, $state.pendingQueue)
 if ($StartFresh) {
   Write-Warning "StartFresh: 작업 커서를 처음으로 초기화합니다. 기존 일봉/지표 데이터는 삭제하지 않습니다."
   $state = Invoke-HistoryJob "start"
@@ -59,7 +59,7 @@ for ($i = 1; $i -le $MaxSteps; $i++) {
 Write-Host ""
 $final = Invoke-HistoryJob "status"
 Write-Host ("최종 상태: {0}" -f $final.status)
-Write-Host ("처리 종목: {0}, 일봉 120일 미만 잔여: {1}" -f $final.job.processed, $final.remainingUnder120)
+Write-Host ("처리 종목: {0}, 대기열 잔여: {1}" -f $final.job.processed, $final.pendingQueue)
 if ($final.job) {
   Write-Host ("누적 일봉 신규: {0}, 수정: {1}, 지표 재계산 종목: {2}, 지표 행: {3}" -f $final.job.candles_inserted, $final.job.candles_updated, $final.job.indicators_recalculated, $final.job.indicator_rows_processed)
   Write-Host ("UTC 일일 예약 쓰기량: {0}/{1}" -f $final.job.daily_reserved_writes, $final.job.daily_budget_writes)
