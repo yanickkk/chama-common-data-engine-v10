@@ -485,6 +485,7 @@ async function ensureSecuritySchema(db){
       job_id TEXT PRIMARY KEY,
       status TEXT NOT NULL CHECK(status IN ('running','paused','budget_wait','error','completed')),
       after_code TEXT NOT NULL DEFAULT '',
+      phase INTEGER NOT NULL DEFAULT 0,
       processed INTEGER NOT NULL DEFAULT 0,
       failed INTEGER NOT NULL DEFAULT 0,
       candles_inserted INTEGER NOT NULL DEFAULT 0,
@@ -1150,11 +1151,11 @@ async function historySyncJob(env,url) {
   if(action==='start') {
     if(job?.status==='running') throw new Error('이미 실행 중인 작업이 있습니다. 먼저 pause 하거나 status를 확인하세요.');
     await db.prepare(`
-      INSERT INTO history_sync_job(job_id,status,after_code,processed,failed,candles_inserted,candles_updated,
+      INSERT INTO history_sync_job(job_id,status,after_code,phase,processed,failed,candles_inserted,candles_updated,
         indicators_recalculated,indicator_rows_processed,day_key,daily_reserved_writes,daily_budget_writes,
         reserve_per_stock,last_error,started_at,updated_at)
-      VALUES(?,'running','',0,0,0,0,0,0,?,0,?,?,NULL,?,?)
-      ON CONFLICT(job_id) DO UPDATE SET status='running',after_code='',processed=0,failed=0,
+      VALUES(?,'running','',0,0,0,0,0,0,0,?,0,?,?,NULL,?,?)
+      ON CONFLICT(job_id) DO UPDATE SET status='running',after_code='',phase=0,processed=0,failed=0,
         candles_inserted=0,candles_updated=0,indicators_recalculated=0,indicator_rows_processed=0,
         day_key=excluded.day_key,daily_reserved_writes=0,daily_budget_writes=excluded.daily_budget_writes,
         reserve_per_stock=excluded.reserve_per_stock,last_error=NULL,started_at=excluded.started_at,updated_at=excluded.updated_at
@@ -1191,15 +1192,29 @@ async function historySyncJob(env,url) {
     return {ok:true,action,status:'budget_wait',afterCode:job.after_code,processed:job.processed,dailyReservedWrites:reserved,dailyBudgetWrites:budget,reservePerStock:reserve,message:'일일 안전 예산에 도달했습니다. UTC 날짜가 바뀐 뒤 resume 하세요.',at:now};
   }
 
-  const selected=await db.prepare(`
+  let selected=await db.prepare(`
     SELECT s.code,s.name,COALESCE(c.candle_count,0) AS candle_count
     FROM stocks s
     LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
     WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
       AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
-      AND s.code>? AND COALESCE(c.candle_count,0)<120
+      AND s.code>? AND ((?=0 AND COALESCE(c.candle_count,0)>=60 AND COALESCE(c.candle_count,0)<120) OR (?=1 AND COALESCE(c.candle_count,0)<60))
     ORDER BY s.code LIMIT 1
-  `).bind(job.after_code||'').first();
+  `).bind(job.after_code||'',Number(job.phase)||0,Number(job.phase)||0).first();
+
+  if(!selected && Number(job.phase)===0) {
+    await db.prepare("UPDATE history_sync_job SET phase=1,after_code='',updated_at=? WHERE job_id=?").bind(isoNow(),jobId).run();
+    job=await getJob();
+    selected=await db.prepare(`
+      SELECT s.code,s.name,COALESCE(c.candle_count,0) AS candle_count
+      FROM stocks s
+      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
+      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
+        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
+        AND s.code>? AND COALESCE(c.candle_count,0)<60
+      ORDER BY s.code LIMIT 1
+    `).bind('').first();
+  }
 
   if(!selected) {
     const remaining=await db.prepare(`
@@ -1209,7 +1224,7 @@ async function historySyncJob(env,url) {
         AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND COALESCE(c.candle_count,0)<120
     `).first();
     await db.prepare("UPDATE history_sync_job SET status='completed',updated_at=? WHERE job_id=?").bind(now,jobId).run();
-    return {ok:true,action,status:'completed',processed:job.processed,failed:job.failed,remainingUnder120:remaining?.n||0,afterCode:job.after_code,message:'현재 커서 이후의 120거래일 미만 종목 처리를 마쳤습니다. 남은 종목은 상장 후 거래일이 짧거나 별도 확인이 필요할 수 있습니다.',at:now};
+    return {ok:true,action,status:'completed',phase:job.phase,processed:job.processed,failed:job.failed,remainingUnder120:remaining?.n||0,afterCode:job.after_code,message:'현재 커서 이후의 120거래일 미만 종목 처리를 마쳤습니다. 남은 종목은 상장 후 거래일이 짧거나 별도 확인이 필요할 수 있습니다.',at:now};
   }
 
   const claim=await db.prepare(`
@@ -1235,7 +1250,7 @@ async function historySyncJob(env,url) {
         last_error=NULL,updated_at=? WHERE job_id=?
     `).bind(selected.code,result.candlesSaved||0,result.candlesUpdated||0,result.indicatorStocksRecalculated||0,result.indicatorRowsProcessed||0,isoNow(),jobId).run();
     const latest=await getJob();
-    return {ok:true,action,status:'running',code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
+    return {ok:true,action,status:'running',phase:latest.phase,code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
       candleResult:result,progress:{processed:latest.processed,afterCode:latest.after_code,
       candlesInserted:latest.candles_inserted,candlesUpdated:latest.candles_updated,
       indicatorsRecalculated:latest.indicators_recalculated,indicatorRowsProcessed:latest.indicator_rows_processed,
@@ -1935,7 +1950,7 @@ async function readMaterials(env,url) {
 // -----------------------------------------------------------------------------
 
 export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(env.DB&&url.pathname!=='/'&&url.pathname!=='/health'){try{await ensureSecuritySchema(env.DB);}catch(e){return json({ok:false,error:`종목 분류 스키마 준비 실패: ${e.message}`},request,500);}}if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(request.method!=='GET')return json({ok:false,error:'Method Not Allowed'},request,405);
-  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.4-common-preferred-policy' ,endpoints:['/health','/api/data/status','/api/data/history-job?action=status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},securityPolicy:'KOSPI/KOSDAQ COMMON+PREFERRED only; unverified excluded',time:new Date().toISOString()},request);
+  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.5-resumable-history-backfill' ,endpoints:['/health','/api/data/status','/api/data/history-job?action=status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},securityPolicy:'KOSPI/KOSDAQ COMMON+PREFERRED only; unverified excluded',time:new Date().toISOString()},request);
   if(url.pathname==='/api/themes'){try{return json(await readThemes(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/themes/stocks'){try{return json(await readThemeStocks(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/materials'){try{return json(await readMaterials(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
