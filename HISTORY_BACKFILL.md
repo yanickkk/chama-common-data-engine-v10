@@ -30,6 +30,13 @@ D1에 저장된 활성 보통주·우선주 가운데 일봉이 120거래일 미
 
 작업 상태는 `idle`, `running`, `paused`, `budget_wait`, `error`, `completed` 중 하나입니다.
 
+## D1 Free 요금제 주의
+
+- D1의 일일 행 읽기 한도는 백필의 쓰기 예약량과 별개이며 계정 내 다른 D1 사용량과 합산됩니다.
+- 백필 실행 중에는 /api/data/audit 및 /api/data/coverage를 반복 호출하지 마세요. 일봉과 지표 테이블을 넓게 읽으므로 백필이 끝난 뒤 실행하는 편이 안전합니다.
+- 실행 스크립트는 D1 읽기 한도 오류가 발생하면 추가 step 및 최종 상태 조회 없이 즉시 중단합니다. 기존 run_id와 커서는 유지됩니다.
+- 한도 오류가 발생하면 UTC 자정 이후 재개하세요. action=start 또는 -StartFresh를 실행하지 마세요.
+
 ## Windows PowerShell 실행
 
 1. GitHub 브랜치의 `scripts/run-history-backfill.ps1` 파일을 내려받습니다.
