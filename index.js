@@ -407,7 +407,7 @@ async function screenMarket(market,top,rawCfg){
     cmCandidates:cmCandidates.slice(0,top),
     calendar,
     scannedAt:new Date().toISOString(),
-    workerVersion:'v11.4-common-preferred-policy',
+    workerVersion:'v11.5-resumable-history-backfill',
     config:cfg,
     method:'검증된 코스피·코스닥 보통주+우선주만 포함(ETF/ETN/ELW/SPAC/리츠/펀드/채권 등 및 분류 미확인 제외)→전체시장 당일 스냅샷+실시간 보강→거래대금 조건→당일 상승률 Top100→0일차→5거래일 50%→달성일 +10% 양봉/20일 전고점 돌파; 차마존·CM 기존 판정 기준 유지'
   };
