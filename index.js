@@ -480,10 +480,21 @@ async function ensureSecuritySchema(db){
       last_error TEXT
     )`).run();
     await db.prepare('CREATE INDEX IF NOT EXISTS idx_indicator_sync_state_status_code ON indicator_sync_state(status, code)').run();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS history_sync_queue (
+      run_id TEXT NOT NULL,
+      code TEXT NOT NULL,
+      phase INTEGER NOT NULL,
+      initial_candle_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK(status IN ('pending','completed')),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(run_id,code)
+    )`).run();
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_history_sync_queue_run_status_phase_code ON history_sync_queue(run_id,status,phase,code)').run();
     // Resumable, quota-bounded historical candle backfill progress.
     await db.prepare(`CREATE TABLE IF NOT EXISTS history_sync_job (
       job_id TEXT PRIMARY KEY,
       status TEXT NOT NULL CHECK(status IN ('running','paused','budget_wait','error','completed')),
+      run_id TEXT NOT NULL DEFAULT '',
       after_code TEXT NOT NULL DEFAULT '',
       phase INTEGER NOT NULL DEFAULT 0,
       processed INTEGER NOT NULL DEFAULT 0,
@@ -1140,27 +1151,34 @@ async function historySyncJob(env,url) {
   let job=await getJob();
 
   if(action==='status') {
-    const remaining=await db.prepare(`
-      SELECT COUNT(*) AS n FROM stocks s
-      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS n FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
-      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
-        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND COALESCE(c.n,0)<120
-    `).first();
-    return {ok:true,action,status:job?.status||'idle',job:job||null,remainingUnder120:remaining?.n||0,dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
+    const remaining=job?.run_id ? await db.prepare("SELECT COUNT(*) AS n FROM history_sync_queue WHERE run_id=? AND status='pending'").bind(job.run_id).first() : {n:0};
+    return {ok:true,action,status:job?.status||'idle',job:job||null,pendingQueue:remaining?.n||0,dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
   }
   if(action==='start') {
     if(job?.status==='running') throw new Error('이미 실행 중인 작업이 있습니다. 먼저 pause 하거나 status를 확인하세요.');
+    const runId=crypto.randomUUID();
+    const queued=await db.prepare(`
+      INSERT INTO history_sync_queue(run_id,code,phase,initial_candle_count,status,updated_at)
+      SELECT ?,s.code,CASE WHEN COALESCE(c.candle_count,0)>=60 THEN 0 ELSE 1 END,
+        COALESCE(c.candle_count,0),'pending',?
+      FROM stocks s
+      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
+      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
+        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND COALESCE(c.candle_count,0)<120
+    `).bind(runId,now).run();
+    const queuedCount=Number(queued.meta?.changes||0);
+    const initialReserve=queuedCount+100;
     await db.prepare(`
-      INSERT INTO history_sync_job(job_id,status,after_code,phase,processed,failed,candles_inserted,candles_updated,
+      INSERT INTO history_sync_job(job_id,status,run_id,after_code,phase,processed,failed,candles_inserted,candles_updated,
         indicators_recalculated,indicator_rows_processed,day_key,daily_reserved_writes,daily_budget_writes,
         reserve_per_stock,last_error,started_at,updated_at)
-      VALUES(?,'running','',0,0,0,0,0,0,0,?,0,?,?,NULL,?,?)
-      ON CONFLICT(job_id) DO UPDATE SET status='running',after_code='',phase=0,processed=0,failed=0,
+      VALUES(?,'running',?,'',0,0,0,0,0,0,0,?,?,?, ?,NULL,?,?)
+      ON CONFLICT(job_id) DO UPDATE SET status='running',run_id=excluded.run_id,after_code='',phase=0,processed=0,failed=0,
         candles_inserted=0,candles_updated=0,indicators_recalculated=0,indicator_rows_processed=0,
-        day_key=excluded.day_key,daily_reserved_writes=0,daily_budget_writes=excluded.daily_budget_writes,
+        day_key=excluded.day_key,daily_reserved_writes=excluded.daily_reserved_writes,daily_budget_writes=excluded.daily_budget_writes,
         reserve_per_stock=excluded.reserve_per_stock,last_error=NULL,started_at=excluded.started_at,updated_at=excluded.updated_at
-    `).bind(jobId,dayKey,dailyBudget,reservePerStock,now,now).run();
-    return {ok:true,action,status:'running',message:'일봉 120거래일 미만 종목의 과거 데이터 보충 작업을 처음부터 시작합니다.',dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
+    `).bind(jobId,runId,dayKey,initialReserve,dailyBudget,reservePerStock,now,now).run();
+    return {ok:true,action,status:'running',runId,queuedCount,initialReservedWrites:initialReserve,message:'60~119거래일 종목을 먼저, 0~59거래일 종목을 다음으로 처리하도록 작업 목록을 만들었습니다.',dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
   }
   if(!job) throw new Error('작업 상태가 없습니다. action=start로 먼저 시작하세요.');
   if(action==='pause') {
@@ -1192,39 +1210,18 @@ async function historySyncJob(env,url) {
     return {ok:true,action,status:'budget_wait',afterCode:job.after_code,processed:job.processed,dailyReservedWrites:reserved,dailyBudgetWrites:budget,reservePerStock:reserve,message:'일일 안전 예산에 도달했습니다. UTC 날짜가 바뀐 뒤 resume 하세요.',at:now};
   }
 
-  let selected=await db.prepare(`
-    SELECT s.code,s.name,COALESCE(c.candle_count,0) AS candle_count
-    FROM stocks s
-    LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
-    WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
-      AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
-      AND s.code>? AND ((?=0 AND COALESCE(c.candle_count,0)>=60 AND COALESCE(c.candle_count,0)<120) OR (?=1 AND COALESCE(c.candle_count,0)<60))
-    ORDER BY s.code LIMIT 1
-  `).bind(job.after_code||'',Number(job.phase)||0,Number(job.phase)||0).first();
+  let selected=await db.prepare("SELECT code,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=? AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id,Number(job.phase)||0).first();
 
   if(!selected && Number(job.phase)===0) {
     await db.prepare("UPDATE history_sync_job SET phase=1,after_code='',updated_at=? WHERE job_id=?").bind(isoNow(),jobId).run();
     job=await getJob();
-    selected=await db.prepare(`
-      SELECT s.code,s.name,COALESCE(c.candle_count,0) AS candle_count
-      FROM stocks s
-      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
-      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
-        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
-        AND s.code>? AND COALESCE(c.candle_count,0)<60
-      ORDER BY s.code LIMIT 1
-    `).bind('').first();
+    selected=await db.prepare("SELECT code,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=1 AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id).first();
   }
 
   if(!selected) {
-    const remaining=await db.prepare(`
-      SELECT COUNT(*) AS n FROM stocks s
-      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
-      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
-        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND COALESCE(c.candle_count,0)<120
-    `).first();
+    const remaining=await db.prepare("SELECT COUNT(*) AS n FROM history_sync_queue WHERE run_id=? AND status='pending'").bind(job.run_id).first();
     await db.prepare("UPDATE history_sync_job SET status='completed',updated_at=? WHERE job_id=?").bind(now,jobId).run();
-    return {ok:true,action,status:'completed',phase:job.phase,processed:job.processed,failed:job.failed,remainingUnder120:remaining?.n||0,afterCode:job.after_code,message:'현재 커서 이후의 120거래일 미만 종목 처리를 마쳤습니다. 남은 종목은 상장 후 거래일이 짧거나 별도 확인이 필요할 수 있습니다.',at:now};
+    return {ok:true,action,status:'completed',phase:job.phase,processed:job.processed,failed:job.failed,pendingQueue:remaining?.n||0,afterCode:job.after_code,message:'작업 목록의 모든 종목 처리를 마쳤습니다. 120거래일 미만으로 남은 종목은 최종 audit 결과에서 확인하세요.',at:now};
   }
 
   const claim=await db.prepare(`
@@ -1243,12 +1240,13 @@ async function historySyncJob(env,url) {
       await db.prepare("UPDATE history_sync_job SET status='error',failed=failed+1,last_error=?,updated_at=? WHERE job_id=?").bind(reason,isoNow(),jobId).run();
       return {ok:false,action,status:'error',code:selected.code,name:selected.name,candleResult:result,lastError:reason,message:'오류가 발생해 커서를 이동하지 않았습니다. 원인 확인 후 resume 하면 같은 종목부터 재시도합니다.',at:isoNow()};
     }
-    await db.prepare(`
-      UPDATE history_sync_job SET after_code=?,processed=processed+1,
+    await db.batch([
+      db.prepare("UPDATE history_sync_queue SET status='completed',updated_at=? WHERE run_id=? AND code=? AND status='pending'").bind(isoNow(),job.run_id,selected.code),
+      db.prepare(`UPDATE history_sync_job SET after_code=?,processed=processed+1,
         candles_inserted=candles_inserted+?,candles_updated=candles_updated+?,
         indicators_recalculated=indicators_recalculated+?,indicator_rows_processed=indicator_rows_processed+?,
-        last_error=NULL,updated_at=? WHERE job_id=?
-    `).bind(selected.code,result.candlesSaved||0,result.candlesUpdated||0,result.indicatorStocksRecalculated||0,result.indicatorRowsProcessed||0,isoNow(),jobId).run();
+        last_error=NULL,updated_at=? WHERE job_id=?`).bind(selected.code,result.candlesSaved||0,result.candlesUpdated||0,result.indicatorStocksRecalculated||0,result.indicatorRowsProcessed||0,isoNow(),jobId)
+    ]);
     const latest=await getJob();
     return {ok:true,action,status:'running',phase:latest.phase,code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
       candleResult:result,progress:{processed:latest.processed,afterCode:latest.after_code,
