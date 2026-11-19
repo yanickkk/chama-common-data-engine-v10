@@ -587,7 +587,8 @@ async function d1Batch(db,statements,batchSize=80){for(let i=0;i<statements.leng
 async function saveUniverse(db,rows) {
   const eligible=(rows||[]).filter(isEligibleCommonStock);
   const stmts=eligible.map(x=>db.prepare(`INSERT INTO stocks(code,name,market,market_cap,listed_shares,active,updated_at,security_type,security_verified,security_source,security_reason) VALUES(?,?,?,?,?,1,?,?,1,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,market_cap=COALESCE(excluded.market_cap,stocks.market_cap),listed_shares=COALESCE(excluded.listed_shares,stocks.listed_shares),active=1,updated_at=excluded.updated_at,security_type=excluded.security_type,security_verified=1,security_source=excluded.security_source,security_reason=excluded.security_reason`).bind(x.code,x.name,x.market,x.marketValue??null,x.listedShares??null,isoNow(),x.securityType,x.securitySource||'NAVER-INDIVIDUAL-STOCKS-V3',x.securityType==='PREFERRED'?'우선주 확인':'개별주식 목록의 보통주 확인'));
-  await d1Batch(db,stmts); return eligible.length;
+  // 유니버스 전체 갱신 시 비활성화·삭제·스키마 확인 쿼리를 포함해도 Worker 요청 한도를 넘지 않도록 배치 크기를 100으로 유지합니다.
+  await d1Batch(db,stmts,100); return eligible.length;
 }
 async function saveQuotes(db,rows) {
   const stmts=rows.filter(x=>x.price!=null).map(x=>db.prepare(`INSERT INTO stock_quotes(code,price,previous_close,change_value,change_pct,volume,trade_value,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET price=excluded.price,previous_close=excluded.previous_close,change_value=excluded.change_value,change_pct=excluded.change_pct,volume=excluded.volume,trade_value=excluded.trade_value,source=excluded.source,updated_at=excluded.updated_at`).bind(x.code,x.price,x.previousClose??null,x.change??null,x.changePct??null,x.volume??0,x.tradeValue??x.value??0,x.source||'UNKNOWN',x.updatedAt||isoNow()));
