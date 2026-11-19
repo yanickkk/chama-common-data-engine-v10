@@ -480,6 +480,25 @@ async function ensureSecuritySchema(db){
       last_error TEXT
     )`).run();
     await db.prepare('CREATE INDEX IF NOT EXISTS idx_indicator_sync_state_status_code ON indicator_sync_state(status, code)').run();
+    // Resumable, quota-bounded historical candle backfill progress.
+    await db.prepare(`CREATE TABLE IF NOT EXISTS history_sync_job (
+      job_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK(status IN ('running','paused','budget_wait','error','completed')),
+      after_code TEXT NOT NULL DEFAULT '',
+      processed INTEGER NOT NULL DEFAULT 0,
+      failed INTEGER NOT NULL DEFAULT 0,
+      candles_inserted INTEGER NOT NULL DEFAULT 0,
+      candles_updated INTEGER NOT NULL DEFAULT 0,
+      indicators_recalculated INTEGER NOT NULL DEFAULT 0,
+      indicator_rows_processed INTEGER NOT NULL DEFAULT 0,
+      day_key TEXT NOT NULL,
+      daily_reserved_writes INTEGER NOT NULL DEFAULT 0,
+      daily_budget_writes INTEGER NOT NULL DEFAULT 70000,
+      reserve_per_stock INTEGER NOT NULL DEFAULT 1100,
+      last_error TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`).run();
     securitySchemaReady=true;
   })().catch(e=>{securitySchemaPromise=null;throw e;});
   return securitySchemaPromise;
@@ -1107,6 +1126,127 @@ async function syncData(env,url) {
   }
   throw new Error('지원하지 않는 sync type입니다. universe, quotes, candles, indicators 중 하나를 사용하세요.');
 }
+// One stock per request; the server reserves a conservative D1 write budget before processing.
+async function historySyncJob(env,url) {
+  const db=requireDb(env);
+  const jobId='history-backfill-v1';
+  const action=String(url.searchParams.get('action')||'status').toLowerCase();
+  const now=new Date().toISOString();
+  const dayKey=now.slice(0,10);
+  const dailyBudget=70000;
+  const reservePerStock=1100;
+  const getJob=()=>db.prepare('SELECT * FROM history_sync_job WHERE job_id=?').bind(jobId).first();
+  let job=await getJob();
+
+  if(action==='status') {
+    const remaining=await db.prepare(`
+      SELECT COUNT(*) AS n FROM stocks s
+      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS n FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
+      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
+        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND COALESCE(c.n,0)<120
+    `).first();
+    return {ok:true,action,status:job?.status||'idle',job:job||null,remainingUnder120:remaining?.n||0,dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
+  }
+  if(action==='start') {
+    if(job?.status==='running') throw new Error('이미 실행 중인 작업이 있습니다. 먼저 pause 하거나 status를 확인하세요.');
+    await db.prepare(`
+      INSERT INTO history_sync_job(job_id,status,after_code,processed,failed,candles_inserted,candles_updated,
+        indicators_recalculated,indicator_rows_processed,day_key,daily_reserved_writes,daily_budget_writes,
+        reserve_per_stock,last_error,started_at,updated_at)
+      VALUES(?,'running','',0,0,0,0,0,0,?,0,?,?,NULL,?,?)
+      ON CONFLICT(job_id) DO UPDATE SET status='running',after_code='',processed=0,failed=0,
+        candles_inserted=0,candles_updated=0,indicators_recalculated=0,indicator_rows_processed=0,
+        day_key=excluded.day_key,daily_reserved_writes=0,daily_budget_writes=excluded.daily_budget_writes,
+        reserve_per_stock=excluded.reserve_per_stock,last_error=NULL,started_at=excluded.started_at,updated_at=excluded.updated_at
+    `).bind(jobId,dayKey,dailyBudget,reservePerStock,now,now).run();
+    return {ok:true,action,status:'running',message:'일봉 120거래일 미만 종목의 과거 데이터 보충 작업을 처음부터 시작합니다.',dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
+  }
+  if(!job) throw new Error('작업 상태가 없습니다. action=start로 먼저 시작하세요.');
+  if(action==='pause') {
+    await db.prepare("UPDATE history_sync_job SET status='paused',updated_at=? WHERE job_id=?").bind(now,jobId).run();
+    return {ok:true,action,status:'paused',afterCode:job.after_code,processed:job.processed,at:now};
+  }
+  if(action==='resume') {
+    if(job.status==='completed') throw new Error('이미 완료된 작업입니다. 새로 시작하려면 action=start를 사용하세요.');
+    if(job.day_key!==dayKey) {
+      await db.prepare("UPDATE history_sync_job SET status='running',day_key=?,daily_reserved_writes=0,last_error=NULL,updated_at=? WHERE job_id=?").bind(dayKey,now,jobId).run();
+    } else {
+      await db.prepare("UPDATE history_sync_job SET status='running',last_error=NULL,updated_at=? WHERE job_id=?").bind(now,jobId).run();
+    }
+    job=await getJob();
+    return {ok:true,action,status:job.status,afterCode:job.after_code,dailyReservedWrites:job.daily_reserved_writes,dailyBudgetWrites:job.daily_budget_writes,at:now};
+  }
+  if(action!=='step') throw new Error('action은 status, start, resume, pause, step 중 하나여야 합니다.');
+  if(job.status!=='running') return {ok:true,action,status:job.status,afterCode:job.after_code,dailyReservedWrites:job.daily_reserved_writes,dailyBudgetWrites:job.daily_budget_writes,lastError:job.last_error||null,message:'실행 상태가 아닙니다. resume 또는 start가 필요합니다.',at:now};
+
+  if(job.day_key!==dayKey) {
+    await db.prepare("UPDATE history_sync_job SET day_key=?,daily_reserved_writes=0,updated_at=? WHERE job_id=?").bind(dayKey,now,jobId).run();
+    job=await getJob();
+  }
+  const reserve=Number(job.reserve_per_stock)||reservePerStock;
+  const budget=Number(job.daily_budget_writes)||dailyBudget;
+  const reserved=Number(job.daily_reserved_writes)||0;
+  if(reserved+reserve>budget) {
+    await db.prepare("UPDATE history_sync_job SET status='budget_wait',updated_at=? WHERE job_id=?").bind(now,jobId).run();
+    return {ok:true,action,status:'budget_wait',afterCode:job.after_code,processed:job.processed,dailyReservedWrites:reserved,dailyBudgetWrites:budget,reservePerStock:reserve,message:'일일 안전 예산에 도달했습니다. UTC 날짜가 바뀐 뒤 resume 하세요.',at:now};
+  }
+
+  const selected=await db.prepare(`
+    SELECT s.code,s.name,COALESCE(c.candle_count,0) AS candle_count
+    FROM stocks s
+    LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
+    WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
+      AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
+      AND s.code>? AND COALESCE(c.candle_count,0)<120
+    ORDER BY s.code LIMIT 1
+  `).bind(job.after_code||'').first();
+
+  if(!selected) {
+    const remaining=await db.prepare(`
+      SELECT COUNT(*) AS n FROM stocks s
+      LEFT JOIN (SELECT code,COUNT(DISTINCT date) AS candle_count FROM stock_daily_candles WHERE length(date)=8 AND close>0 GROUP BY code) c ON c.code=s.code
+      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED')
+        AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND COALESCE(c.candle_count,0)<120
+    `).first();
+    await db.prepare("UPDATE history_sync_job SET status='completed',updated_at=? WHERE job_id=?").bind(now,jobId).run();
+    return {ok:true,action,status:'completed',processed:job.processed,failed:job.failed,remainingUnder120:remaining?.n||0,afterCode:job.after_code,message:'현재 커서 이후의 120거래일 미만 종목 처리를 마쳤습니다. 남은 종목은 상장 후 거래일이 짧거나 별도 확인이 필요할 수 있습니다.',at:now};
+  }
+
+  const claim=await db.prepare(`
+    UPDATE history_sync_job SET daily_reserved_writes=daily_reserved_writes+?,updated_at=?
+    WHERE job_id=? AND status='running' AND after_code=? AND daily_reserved_writes=?
+  `).bind(reserve,now,jobId,job.after_code||'',reserved).run();
+  if(Number(claim.meta?.changes||0)!==1) {
+    return {ok:true,action,status:'busy',message:'다른 요청이 먼저 작업을 선점했습니다. 잠시 후 다시 step을 호출하세요.',at:now};
+  }
+
+  try {
+    const candleUrl=new URL('/api/data/sync?type=candles&provider=naver&days=700&minCandles=120&limit=1&code='+encodeURIComponent(selected.code),url.origin);
+    const result=await syncData(env,candleUrl);
+    if(!result.ok||result.failed>0||result.indicatorFailed>0) {
+      const reason=JSON.stringify({errors:result.errors||[],indicatorErrors:result.indicatorErrors||[]}).slice(0,1500);
+      await db.prepare("UPDATE history_sync_job SET status='error',failed=failed+1,last_error=?,updated_at=? WHERE job_id=?").bind(reason,isoNow(),jobId).run();
+      return {ok:false,action,status:'error',code:selected.code,name:selected.name,candleResult:result,lastError:reason,message:'오류가 발생해 커서를 이동하지 않았습니다. 원인 확인 후 resume 하면 같은 종목부터 재시도합니다.',at:isoNow()};
+    }
+    await db.prepare(`
+      UPDATE history_sync_job SET after_code=?,processed=processed+1,
+        candles_inserted=candles_inserted+?,candles_updated=candles_updated+?,
+        indicators_recalculated=indicators_recalculated+?,indicator_rows_processed=indicator_rows_processed+?,
+        last_error=NULL,updated_at=? WHERE job_id=?
+    `).bind(selected.code,result.candlesSaved||0,result.candlesUpdated||0,result.indicatorStocksRecalculated||0,result.indicatorRowsProcessed||0,isoNow(),jobId).run();
+    const latest=await getJob();
+    return {ok:true,action,status:'running',code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
+      candleResult:result,progress:{processed:latest.processed,afterCode:latest.after_code,
+      candlesInserted:latest.candles_inserted,candlesUpdated:latest.candles_updated,
+      indicatorsRecalculated:latest.indicators_recalculated,indicatorRowsProcessed:latest.indicator_rows_processed,
+      dailyReservedWrites:latest.daily_reserved_writes,dailyBudgetWrites:latest.daily_budget_writes},
+      message:'종목 1개 처리를 완료했습니다. 다음 step을 호출하면 이어서 진행합니다.',at:isoNow()};
+  } catch(error) {
+    await db.prepare("UPDATE history_sync_job SET status='error',failed=failed+1,last_error=?,updated_at=? WHERE job_id=?").bind(String(error?.message||error).slice(0,1500),isoNow(),jobId).run();
+    return {ok:false,action,status:'error',code:selected.code,name:selected.name,error:error.message,message:'오류가 발생해 커서를 이동하지 않았습니다. 원인 확인 후 resume 하면 같은 종목부터 재시도합니다.',at:isoNow()};
+  }
+}
+
 async function dataAudit(env,url) {
   const db=requireDb(env);
   const minCandles=Math.min(250,Math.max(120,Number(url.searchParams.get('minCandles')||120)));
@@ -1795,11 +1935,12 @@ async function readMaterials(env,url) {
 // -----------------------------------------------------------------------------
 
 export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(env.DB&&url.pathname!=='/'&&url.pathname!=='/health'){try{await ensureSecuritySchema(env.DB);}catch(e){return json({ok:false,error:`종목 분류 스키마 준비 실패: ${e.message}`},request,500);}}if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(request.method!=='GET')return json({ok:false,error:'Method Not Allowed'},request,405);
-  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.4-common-preferred-policy' ,endpoints:['/health','/api/data/status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},securityPolicy:'KOSPI/KOSDAQ COMMON+PREFERRED only; unverified excluded',time:new Date().toISOString()},request);
+  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.4-common-preferred-policy' ,endpoints:['/health','/api/data/status','/api/data/history-job?action=status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},securityPolicy:'KOSPI/KOSDAQ COMMON+PREFERRED only; unverified excluded',time:new Date().toISOString()},request);
   if(url.pathname==='/api/themes'){try{return json(await readThemes(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/themes/stocks'){try{return json(await readThemeStocks(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/materials'){try{return json(await readMaterials(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/status'){try{return json({ok:true,...await dataStatus(env)},request);}catch(e){return json({ok:false,error:e.message},request,500);}}
+  if(url.pathname==='/api/data/history-job'){try{return json(await historySyncJob(env,url),request);}catch(e){return json({ok:false,error:e.message},request,400);}}
   if(url.pathname==='/api/data/universe/validate'){try{return json(await validateUniverseMaster(env,url),request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   if(url.pathname==='/api/data/coverage'){try{return json(await dataCoverage(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/audit'){try{return json(await dataAudit(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
