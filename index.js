@@ -286,8 +286,9 @@ async function fetchUniverse(market){
       const itemMarket=String(item?.marketType||item?.exchangeType||'').toUpperCase();
       if(!isValidStockCode(code)||!name||name.length>100||!['KOSPI','KOSDAQ'].includes(itemMarket))continue;
       const krx=item?.krx||{};
+      const securityType=classifySecurityType(item,krx,name,'NAVER-INDIVIDUAL-STOCKS-V3');
       byCode.set(code,{
-        code,name,market:itemMarket,
+        code,name,market:itemMarket,securityType,securityVerified:securityType==='COMMON'||securityType==='PREFERRED',securitySource:'NAVER-INDIVIDUAL-STOCKS-V3',
         tradableStatus:String(krx.tradableStatus??item.tradableStatus??'').trim().toLowerCase(),
         tradableStatusCode:String(krx.tradableStatusCode??item.tradableStatusCode??'').trim(),
         marketValue:num(item?.marketValue??item?.marketCap),
@@ -324,6 +325,10 @@ async function screenMarket(market,top,rawCfg){
   const universeResult=await fetchUniverse(market);
   if(!universeResult.complete)throw new Error(`종목 유니버스 수집이 불완전합니다. pages=${universeResult.pages}, received=${universeResult.sourceItemCount}, expected=${universeResult.totalCount??'unknown'}; ${(universeResult.errors||[]).join(' | ')}`);
   const universe=universeResult.rows.filter(isEligibleCommonStock);
+  const commonStockCount=universe.filter(x=>x.securityType==='COMMON').length;
+  const preferredStockCount=universe.filter(x=>x.securityType==='PREFERRED').length;
+  const classificationUnverifiedCount=universeResult.rows.filter(x=>x.securityType==='UNVERIFIED').length;
+  const productExcludedCount=universeResult.rows.filter(x=>x.securityType==='EXCLUDED').length;
   if(!universe.length){ throw new Error('종목 유니버스를 가져오지 못했습니다. '+(universeResult.errors||[]).slice(0,3).join(' | ')); }
 
   // 유니버스 자체에 현재가/등락률/거래대금이 들어 있으면 그것을 1차 시장 스냅샷으로 사용합니다.
@@ -391,6 +396,7 @@ async function screenMarket(market,top,rawCfg){
 
   return {
     universeCount:universe.length,
+    commonStockCount,preferredStockCount,classificationUnverifiedCount,productExcludedCount,
     universeSourceErrors:universeResult.errors?.slice(0,8)||[],
     quoteCount:Object.keys(quotes).length,
     marketSnapshotCount:snapshotBefore,
@@ -401,14 +407,36 @@ async function screenMarket(market,top,rawCfg){
     cmCandidates:cmCandidates.slice(0,top),
     calendar,
     scannedAt:new Date().toISOString(),
-    workerVersion:'v9-market-snapshot-cm',
+    workerVersion:'v11.4-common-preferred-policy',
     config:cfg,
-    method:'전체시장→ETF/ETN/스팩/SPAC 제외→전체시장 당일 스냅샷+실시간 보강→거래대금 조건→당일 상승률 Top100→0일차→5거래일 50%→달성일 +10% 양봉/20일 전고점 돌파; 차마존=EMA5/10/20/60/120 필수근접+추가조건 2개 이상'
+    method:'검증된 코스피·코스닥 보통주+우선주만 포함(ETF/ETN/ELW/SPAC/리츠/펀드/채권 등 및 분류 미확인 제외)→전체시장 당일 스냅샷+실시간 보강→거래대금 조건→당일 상승률 Top100→0일차→5거래일 50%→달성일 +10% 양봉/20일 전고점 돌파; 차마존·CM 기존 판정 기준 유지'
   };
 }
 
-async function getQuotes(codes){const n=await fetchNaver(codes);return codes.map(code=>n[code]||{code,source:'ERROR'});}
-async function getAnalysis(codes){const q=await getQuotes(codes),out=[];for(const x of q){try{const h=await fetchHistory(x.code);out.push({...x,history:h,analysis:analyze(x,h)});}catch(e){out.push({...x,history:[],analysis:null});}}return out;}
+async function getQuotes(codes,env){
+  const db=requireDb(env),targets=[...new Set(codes.map(normalizeStockCode))];
+  if(!targets.length)return [];
+  const placeholders=targets.map(()=>'?').join(',');
+  const selected=await db.prepare(`SELECT code,name,market,security_type AS securityType,security_verified AS securityVerified FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code IN (${placeholders})`).bind(...targets).all();
+  const allowed=new Map((selected.results||[]).map(x=>[normalizeStockCode(x.code),x]));
+  const allowedCodes=[...allowed.keys()];
+  const n=allowedCodes.length?await fetchNaver(allowedCodes):{};
+  return codes.map(raw=>{
+    const code=normalizeStockCode(raw),stock=allowed.get(code);
+    if(!stock)return {code,eligible:false,source:'EXCLUDED',error:'분류 검증이 완료된 코스피·코스닥 보통주/우선주가 아닙니다.'};
+    const quote=n[code];
+    return quote?{...quote,name:quote.name||stock.name,market:stock.market,securityType:stock.securityType,eligible:true}:{code,name:stock.name,market:stock.market,securityType:stock.securityType,eligible:true,source:'ERROR'};
+  });
+}
+async function getAnalysis(codes,env){
+  const q=await getQuotes(codes,env),out=[];
+  for(const x of q){
+    if(!x.eligible){out.push({...x,history:[],analysis:null});continue;}
+    try{const h=await fetchHistory(x.code);out.push({...x,history:h,analysis:analyze(x,h)});}
+    catch(e){out.push({...x,history:[],analysis:null,analysisError:e.message});}
+  }
+  return out;
+}
 
 // ---- Shared market data engine v1 (KIS + Cloudflare D1) ----------------------
 let kisTokenCache = { token: null, expiresAt: 0, base: '' };
@@ -417,6 +445,42 @@ const isoNow = () => new Date().toISOString();
 const ymd = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
 function kisBase(env) { return String(env.KIS_MODE || 'paper').toLowerCase() === 'live' ? 'https://openapi.koreainvestment.com:9443' : 'https://openapivts.koreainvestment.com:29443'; }
 function requireDb(env) { if (!env.DB) throw new Error('D1 데이터베이스가 연결되지 않았습니다. wrangler.jsonc의 DB binding과 database_id를 설정하세요.'); return env.DB; }
+let securitySchemaReady=false;
+let securitySchemaPromise=null;
+async function ensureSecuritySchema(db){
+  if(securitySchemaReady)return;
+  if(securitySchemaPromise)return securitySchemaPromise;
+  securitySchemaPromise=(async()=>{
+    const info=await db.prepare('PRAGMA table_info(stocks)').all();
+    const cols=new Set((info.results||[]).map(x=>String(x.name)));
+    const definitions=[
+      ['security_type',"ALTER TABLE stocks ADD COLUMN security_type TEXT NOT NULL DEFAULT 'UNVERIFIED'"],
+      ['security_verified',"ALTER TABLE stocks ADD COLUMN security_verified INTEGER NOT NULL DEFAULT 0"],
+      ['security_source',"ALTER TABLE stocks ADD COLUMN security_source TEXT NOT NULL DEFAULT ''"],
+      ['security_reason',"ALTER TABLE stocks ADD COLUMN security_reason TEXT NOT NULL DEFAULT '기존 데이터 분류 미확인'"]
+    ];
+    for(const [name,sql] of definitions){
+      if(cols.has(name))continue;
+      try{await db.prepare(sql).run();cols.add(name);}
+      catch(error){
+        // 여러 Worker isolate가 첫 요청에서 동시에 마이그레이션해도 중복 컬럼 오류는 안전하게 처리합니다.
+        const fresh=await db.prepare('PRAGMA table_info(stocks)').all();
+        const freshCols=new Set((fresh.results||[]).map(x=>String(x.name)));
+        if(!freshCols.has(name))throw error;
+        cols.add(name);
+      }
+    }
+    securitySchemaReady=true;
+  })().catch(e=>{securitySchemaPromise=null;throw e;});
+  return securitySchemaPromise;
+}
+async function requireEligibleStock(env,code){
+  const db=requireDb(env),target=normalizeStockCode(code);
+  if(!isValidStockCode(target))throw new Error('유효한 종목코드가 아닙니다.');
+  const row=await db.prepare("SELECT code,name,market,security_type AS securityType FROM stocks WHERE code=? AND active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')").bind(target).first();
+  if(!row)throw new Error('분류 검증이 완료된 코스피·코스닥 보통주/우선주가 아닙니다.');
+  return row;
+}
 function requireKis(env) { if (!env.KIS_APP_KEY || !env.KIS_APP_SECRET) throw new Error('KIS_APP_KEY와 KIS_APP_SECRET Worker Secret을 먼저 등록하세요.'); }
 async function kisToken(env) {
   requireKis(env);
@@ -534,8 +598,10 @@ function calculateIndicatorRows(code,candles) {
 }
 async function d1Batch(db,statements,batchSize=80){for(let i=0;i<statements.length;i+=batchSize)await db.batch(statements.slice(i,i+batchSize));}
 async function saveUniverse(db,rows) {
-  const stmts=rows.map(x=>db.prepare(`INSERT INTO stocks(code,name,market,market_cap,listed_shares,active,updated_at) VALUES(?,?,?,?,?,1,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,market_cap=COALESCE(excluded.market_cap,stocks.market_cap),listed_shares=COALESCE(excluded.listed_shares,stocks.listed_shares),active=1,updated_at=excluded.updated_at`).bind(x.code,x.name,x.market||'UNKNOWN',x.marketValue??null,x.listedShares??null,isoNow()));
-  await d1Batch(db,stmts); return rows.length;
+  const eligible=(rows||[]).filter(isEligibleCommonStock);
+  const stmts=eligible.map(x=>db.prepare(`INSERT INTO stocks(code,name,market,market_cap,listed_shares,active,updated_at,security_type,security_verified,security_source,security_reason) VALUES(?,?,?,?,?,1,?,?,1,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,market_cap=COALESCE(excluded.market_cap,stocks.market_cap),listed_shares=COALESCE(excluded.listed_shares,stocks.listed_shares),active=1,updated_at=excluded.updated_at,security_type=excluded.security_type,security_verified=1,security_source=excluded.security_source,security_reason=excluded.security_reason`).bind(x.code,x.name,x.market,x.marketValue??null,x.listedShares??null,isoNow(),x.securityType,x.securitySource||'NAVER-INDIVIDUAL-STOCKS-V3',x.securityType==='PREFERRED'?'우선주 확인':'개별주식 목록의 보통주 확인'));
+  // 유니버스 전체 갱신 시 비활성화·삭제·스키마 확인 쿼리를 포함해도 Worker 요청 한도를 넘지 않도록 배치 크기를 100으로 유지합니다.
+  await d1Batch(db,stmts,100); return eligible.length;
 }
 async function saveQuotes(db,rows) {
   const stmts=rows.filter(x=>x.price!=null).map(x=>db.prepare(`INSERT INTO stock_quotes(code,price,previous_close,change_value,change_pct,volume,trade_value,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET price=excluded.price,previous_close=excluded.previous_close,change_value=excluded.change_value,change_pct=excluded.change_pct,volume=excluded.volume,trade_value=excluded.trade_value,source=excluded.source,updated_at=excluded.updated_at`).bind(x.code,x.price,x.previousClose??null,x.change??null,x.changePct??null,x.volume??0,x.tradeValue??x.value??0,x.source||'UNKNOWN',x.updatedAt||isoNow()));
@@ -676,11 +742,14 @@ async function saveIndicatorsWithState(db,code,rows,refreshTimestamp=false) {
 
 async function dataStatus(env) {
   const db=env.DB; if(!db)return {dbConfigured:false,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'};
-  const [s,q,c,i,pending,completed]=await Promise.all(['stocks','stock_quotes','stock_daily_candles','stock_indicators'].map(t=>db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).first()).concat([
+  const [s,q,c,i,pending,completed,eligible,unverified,excluded]=await Promise.all(['stocks','stock_quotes','stock_daily_candles','stock_indicators'].map(t=>db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).first()).concat([
     db.prepare(`SELECT COUNT(*) AS n FROM indicator_sync_state WHERE status='pending'`).first(),
-    db.prepare(`SELECT COUNT(*) AS n FROM indicator_sync_state WHERE status='completed'`).first()
+    db.prepare(`SELECT COUNT(*) AS n FROM indicator_sync_state WHERE status='completed'`).first(),
+    db.prepare("SELECT COUNT(*) AS n FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')").first(),
+    db.prepare("SELECT COUNT(*) AS n FROM stocks WHERE active=1 AND security_verified=0").first(),
+    db.prepare("SELECT COUNT(*) AS n FROM stocks WHERE active=1 AND security_type='EXCLUDED'").first()
   ]));
-  return {dbConfigured:true,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper',counts:{stocks:s?.n||0,quotes:q?.n||0,candles:c?.n||0,indicators:i?.n||0,indicatorsPending:pending?.n||0,indicatorsCompleted:completed?.n||0}};
+  return {dbConfigured:true,kisConfigured:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper',securityPolicy:'KOSPI/KOSDAQ COMMON+PREFERRED; unverified excluded',counts:{stocks:s?.n||0,eligibleStocks:eligible?.n||0,unverifiedStocks:unverified?.n||0,excludedStocks:excluded?.n||0,quotes:q?.n||0,candles:c?.n||0,indicators:i?.n||0,indicatorsPending:pending?.n||0,indicatorsCompleted:completed?.n||0}};
 }
 // Read-only stock master validation. This endpoint never writes to D1.
 async function validateUniverseMaster(env, url) {
@@ -703,11 +772,11 @@ async function validateUniverseMaster(env, url) {
   // 네이버 공개 종목 목록을 시장별로 수집합니다. fetchUniverse는 D1에 쓰지 않습니다.
   const reference = await fetchUniverse(market);
   const d1Result = await db.prepare(
-    'SELECT code, name, market, active FROM stocks WHERE active=1'
+    "SELECT code, name, market, active, security_type AS securityType, security_verified AS securityVerified FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')"
   ).all();
   const d1Rows = d1Result.results || [];
   const d1ByCode = new Map(d1Rows.map(x => [normalizeStockCode(x.code), x]));
-  const referenceByCode = new Map(reference.rows.map(x => [normalizeStockCode(x.code), x]));
+  const referenceByCode = new Map(reference.rows.filter(isEligibleCommonStock).map(x => [normalizeStockCode(x.code), x]));
 
   const targetCodes = requestedCodes.length
     ? requestedCodes
@@ -794,8 +863,15 @@ async function syncData(env,url) {
   const maxBatch=type==='candles'?1:(type==='quotes'?(selectedProvider==='naver'?20:5):(['indicators','indicators-repair'].includes(type)?(type==='indicators-repair'?1:5):200));
   const limit=Math.min(maxBatch,requestedLimit);
   if(type==='universe'){
-    const market=(url.searchParams.get('market')||'ALL').toUpperCase(); const u=await fetchUniverse(market); if(!u.complete)throw new Error('종목 유니버스 페이지 수집이 불완전하여 D1 저장을 중단했습니다. '+(u.errors||[]).join(' | ')); await db.prepare("DELETE FROM stocks WHERE code='000000'").run(); const saved=await saveUniverse(db,u.rows);
-    return {ok:true,type,market,found:u.rows.length,saved,pages:u.pages,totalCount:u.totalCount,sourceUniqueCount:u.sourceUniqueCount,coverage:u.coverage,errors:(u.errors||[]).slice(0,10),source:u.source,at:isoNow()};
+    const market=(url.searchParams.get('market')||'ALL').toUpperCase(); const u=await fetchUniverse(market); if(!u.complete)throw new Error('종목 유니버스 페이지 수집이 불완전하여 D1 저장을 중단했습니다. '+(u.errors||[]).join(' | '));
+    if(market==='ALL')await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1").run();
+    else await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1 AND upper(market)=?").bind(market).run();
+    await db.prepare("DELETE FROM stocks WHERE code='000000'").run(); const saved=await saveUniverse(db,u.rows);
+    const commonStocks=u.rows.filter(x=>x.securityType==='COMMON'&&isEligibleCommonStock(x)).length;
+    const preferredStocks=u.rows.filter(x=>x.securityType==='PREFERRED'&&isEligibleCommonStock(x)).length;
+    const unverifiedExcluded=u.rows.filter(x=>x.securityType==='UNVERIFIED').length;
+    const productExcluded=u.rows.filter(x=>x.securityType==='EXCLUDED').length;
+    return {ok:true,type,market,discovered:u.rows.length,found:saved,saved,commonStocks,preferredStocks,unverifiedExcluded,productExcluded,policy:'KOSPI/KOSDAQ 보통주+우선주만 포함; 미확인 분류 제외',pages:u.pages,totalCount:u.totalCount,sourceUniqueCount:u.sourceUniqueCount,coverage:u.coverage,errors:(u.errors||[]).slice(0,10),source:u.source,at:isoNow()};
   }
   if(type==='indicators-repair'){
     // Keyset pagination: 완료된 종목은 후보 목록에서 빠져도 다음 종목을 건너뛰지 않습니다.
@@ -815,7 +891,7 @@ async function syncData(env,url) {
       FROM stocks s
       JOIN candle_counts c ON c.code=s.code
       LEFT JOIN indicator_counts i ON i.code=s.code
-      WHERE s.active=1 AND s.code<>'000000'
+      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
         AND (s.code>? OR EXISTS (
           SELECT 1 FROM indicator_sync_state st
           WHERE st.code=s.code AND st.status='pending'
@@ -869,10 +945,10 @@ async function syncData(env,url) {
   if(requestedCode!==null){
     const target=normalizeStockCode(requestedCode);
     if(!isValidStockCode(target))throw new Error('유효한 6자리 상장 종목 code가 필요합니다. 000000은 사용할 수 없습니다.');
-    const selected=await db.prepare('SELECT code,name,market FROM stocks WHERE active=1 AND code=?').bind(target).all();
+    const selected=await db.prepare("SELECT code,name,market FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code=?").bind(target).all();
     stocks=selected.results||[];
   } else {
-    const selected=await db.prepare(`SELECT code,name,market FROM stocks WHERE active=1 AND code<>'000000' ORDER BY code LIMIT ? OFFSET ?`).bind(limit,offset).all();
+    const selected=await db.prepare(`SELECT code,name,market FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code<>'000000' ORDER BY code LIMIT ? OFFSET ?`).bind(limit,offset).all();
     stocks=selected.results||[];
   }
   if(!stocks.length)return {ok:true,type,offset,requestedCode:requestedCode??null,processed:0,message:'대상 종목이 없습니다. 종목 마스터에 code가 등록되어 있는지 확인하세요.'};
@@ -1042,7 +1118,7 @@ async function dataAudit(env,url) {
              ) THEN 1 ELSE 0 END AS extra_indicator_dates
       FROM stocks s LEFT JOIN candle_counts c ON c.code=s.code
       LEFT JOIN indicator_counts i ON i.code=s.code
-      WHERE s.active=1 AND s.code<>'000000'
+      WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
     )
     SELECT *, CASE
       WHEN candle_count=0 THEN 'zero'
@@ -1107,18 +1183,19 @@ async function dataAudit(env,url) {
 
 async function dataCoverage(env) {
   const db=requireDb(env);
-  const total=await db.prepare('SELECT COUNT(*) AS n FROM stocks WHERE active=1 AND code<>\'000000\'').first();
-  const quotes=await db.prepare('SELECT COUNT(*) AS n FROM stocks s INNER JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.code<>\'000000\'').first();
-  const candle=await db.prepare('SELECT COUNT(DISTINCT code) AS n, COUNT(*) AS rows FROM stock_daily_candles').first();
-  const indicator=await db.prepare('SELECT COUNT(DISTINCT code) AS n, COUNT(*) AS rows FROM stock_indicators').first();
-  const missingQuotes=await db.prepare('SELECT s.code,s.name FROM stocks s LEFT JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.code<>\'000000\' AND q.code IS NULL ORDER BY s.code LIMIT 20').all();
-  const missingCandles=await db.prepare('SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_daily_candles) c ON c.code=s.code WHERE s.active=1 AND s.code<>\'000000\' AND c.code IS NULL ORDER BY s.code LIMIT 20').all();
-  const missingIndicators=await db.prepare('SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_indicators) i ON i.code=s.code WHERE s.active=1 AND s.code<>\'000000\' AND i.code IS NULL ORDER BY s.code LIMIT 20').all();
+  const total=await db.prepare("SELECT COUNT(*) AS n FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ') AND code<>'000000'").first();
+  const quotes=await db.prepare("SELECT COUNT(*) AS n FROM stocks s INNER JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'").first();
+  const candle=await db.prepare("SELECT COUNT(DISTINCT d.code) AS n, COUNT(*) AS rows FROM stock_daily_candles d INNER JOIN stocks s ON s.code=d.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')").first();
+  const indicator=await db.prepare("SELECT COUNT(DISTINCT d.code) AS n, COUNT(*) AS rows FROM stock_indicators d INNER JOIN stocks s ON s.code=d.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')").first();
+  const missingQuotes=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND q.code IS NULL ORDER BY s.code LIMIT 20").all();
+  const missingCandles=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_daily_candles) c ON c.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND c.code IS NULL ORDER BY s.code LIMIT 20").all();
+  const missingIndicators=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_indicators) i ON i.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND i.code IS NULL ORDER BY s.code LIMIT 20").all();
   const n=Number(total?.n||0), q=Number(quotes?.n||0), c=Number(candle?.n||0), i=Number(indicator?.n||0);
   return {ok:true,totalStocks:n,coverage:{quotes:{stocks:q,missing:Math.max(0,n-q),percent:n?Number((q/n*100).toFixed(2)):0},candles:{stocks:c,rows:Number(candle?.rows||0),missing:Math.max(0,n-c),percent:n?Number((c/n*100).toFixed(2)):0},indicators:{stocks:i,rows:Number(indicator?.rows||0),missing:Math.max(0,n-i),percent:n?Number((i/n*100).toFixed(2)):0}},missingSamples:{quotes:missingQuotes.results||[],candles:missingCandles.results||[],indicators:missingIndicators.results||[]},note:'누락 샘플은 각 항목 최대 20종목입니다.'};
 }
 async function dataRead(env,url,path) {
   const db=requireDb(env),code=normalizeStockCode(url.searchParams.get('code')||''); if(!isValidStockCode(code))throw new Error('유효한 6자리 종목코드가 필요합니다.');
+  await requireEligibleStock(env,code);
   if(path==='/api/data/candles'){const limit=Math.min(2500,Math.max(1,Number(url.searchParams.get('limit')||700)));const r=await db.prepare('SELECT * FROM stock_daily_candles WHERE code=? ORDER BY date DESC LIMIT ?').bind(code,limit).all();return {ok:true,code,rows:(r.results||[]).reverse()};}
   if(path==='/api/data/indicators'){const limit=Math.min(2500,Math.max(1,Number(url.searchParams.get('limit')||700)));const r=await db.prepare('SELECT * FROM stock_indicators WHERE code=? ORDER BY date DESC LIMIT ?').bind(code,limit).all();return {ok:true,code,rows:(r.results||[]).reverse()};}
   if(path==='/api/data/quote'){
@@ -1200,20 +1277,36 @@ function isPreferredStockName(name) {
   return /우선주|우(?:B|C)?$/.test(normalized);
 }
 
+const NON_EQUITY_SECURITY_RE=/(ETF|ETN|ELW|스팩|SPAC|기업인수목적|(?:리츠|REIT)$|이리츠코크렙|부동산투자회사|투자회사|채권|국채|회사채|선물|펀드|투자신탁|수익증권)/i;
+const SECURITY_TYPE_FIELDS=['securityType','securityTypeName','securityTypeCode','stockType','stockTypeName','stockTypeCode','itemType','itemTypeName','itemTypeCode','issueType','issueTypeName','securityKind','productType','stockKind','stockEndType','endType'];
+function classifySecurityType(item={},krx={},name='',source=''){
+  const market=String(item.marketType??item.market??'').toUpperCase();
+  const normalized=String(name||item.itemName||item.name||'').replace(/\s+/g,'').toUpperCase();
+  if(!['KOSPI','KOSDAQ'].includes(market))return 'UNVERIFIED';
+  if(NON_EQUITY_SECURITY_RE.test(normalized)||INFRASTRUCTURE_INVESTMENT_NAMES.has(normalized)||/인프라(?:투자|펀드|투융자)/.test(normalized))return 'EXCLUDED';
+  const status=String(krx.tradableStatus??item.tradableStatus??'').trim().toLowerCase();
+  const statusCode=String(krx.tradableStatusCode??item.tradableStatusCode??'').trim().toLowerCase();
+  if((status&&status!=='tradable')||(statusCode&&statusCode!=='ok'))return 'UNVERIFIED';
+  const values=SECURITY_TYPE_FIELDS.map(k=>item?.[k]??krx?.[k]).filter(v=>v!==undefined&&v!==null&&String(v).trim()!=='').map(v=>String(v).trim().toUpperCase().replace(/[\\s-]+/g,'_'));
+  const joined=values.join('|');
+  if(/ETF|ETN|ELW|SPAC|REIT|FUND|BOND|FUTURE|OPTION|WARRANT|투자신탁|상장지수|주식워런트|기업인수목적|리츠|펀드|채권|선물|파생/.test(joined))return 'EXCLUDED';
+  if(/PREFERRED|PREF|PREFERENCE|우선주|우선/.test(joined)||isPreferredStockName(normalized))return 'PREFERRED';
+  if(/COMMON|COMMON_STOCK|COMMONSTOCK|ORDINARY|ORDINARY_SHARE|^STOCK$|^ST$|^STK$|보통주|^주식$/.test(joined))return 'COMMON';
+  if(values.length===0&&source==='NAVER-INDIVIDUAL-STOCKS-V3')return 'COMMON';
+  return 'UNVERIFIED';
+}
 function isEligibleCommonStock(row) {
   const market=String(row.market||'').toUpperCase();
   const name=String(row.name||'').replace(/\s+/g,'').toUpperCase();
+  const securityType=String(row.securityType??row.security_type??'').toUpperCase();
+  const verified=Number(row.securityVerified??row.security_verified??0)===1 || row.securityVerified===true;
   const tradableStatus=String(row.tradableStatus||'').trim().toLowerCase();
   const tradableStatusCode=String(row.tradableStatusCode||'').trim().toLowerCase();
-  if(!['KOSPI','KOSDAQ','KRX'].includes(market)) return false;
-  if(/ETF|ETN|스팩|SPAC/.test(name)) return false;
-  // 리츠 명칭은 접미사 기준으로 판별하고, 예외적으로 이리츠코크렙을 별도 제외한다.
-  if(/(?:리츠|REIT)$/.test(name)||name==='이리츠코크렙') return false;
-  if(INFRASTRUCTURE_INVESTMENT_NAMES.has(name)) return false;
-  if(/인프라(?:투자|펀드|투융자)/.test(name)) return false;
-  if(isPreferredStockName(name)) return false;
-  if(tradableStatus && tradableStatus!=='tradable') return false;
-  if(tradableStatusCode && tradableStatusCode!=='ok') return false;
+  if(!['KOSPI','KOSDAQ'].includes(market))return false;
+  if(!verified||!['COMMON','PREFERRED'].includes(securityType))return false;
+  if(NON_EQUITY_SECURITY_RE.test(name)||INFRASTRUCTURE_INVESTMENT_NAMES.has(name)||/인프라(?:투자|펀드|투융자)/.test(name))return false;
+  if(tradableStatus&&tradableStatus!=='tradable')return false;
+  if(tradableStatusCode&&tradableStatusCode!=='ok')return false;
   return true;
 }
 async function discoverNaverThemeList() {
@@ -1401,7 +1494,7 @@ async function importNaverThemes(env, body) {
   }
 
   const stockRows = await db.prepare(
-    `SELECT code, name, market FROM stocks WHERE active=1`
+    "SELECT code, name, market, security_type AS securityType, security_verified AS securityVerified FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')"
   ).all();
 
   const stockMap = new Map(
@@ -1662,7 +1755,7 @@ async function readThemeStocks(env,url) {
     INNER JOIN stocks s ON s.code=m.code
     INNER JOIN themes t ON t.theme_code=m.theme_code
     LEFT JOIN stock_quotes q ON q.code=m.code
-    WHERE m.active=1 AND t.active=1`;
+    WHERE m.active=1 AND t.active=1 AND s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')`;
   const args=[];
   if(themeCode){sql+=' AND m.theme_code=?';args.push(themeCode);}
   if(code){sql+=' AND m.code=?';args.push(code);}
@@ -1681,13 +1774,14 @@ async function readMaterials(env,url) {
       sm.source_type,sm.source_url,sm.published_at,sm.verified_at,sm.verification_status,
       sm.material_score,sm.expires_at,sm.notes
     FROM stock_materials sm INNER JOIN material_types mt ON mt.material_code=sm.material_code
-    WHERE sm.code=? ORDER BY sm.published_at DESC LIMIT 100`).bind(code).all();
+    INNER JOIN stocks s ON s.code=sm.code
+    WHERE sm.code=? AND s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') ORDER BY sm.published_at DESC LIMIT 100`).bind(code).all();
   return {ok:true,code,count:(r.results||[]).length,materials:r.results||[]};
 }
 // -----------------------------------------------------------------------------
 
-export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(request.method!=='GET')return json({ok:false,error:'Method Not Allowed'},request,405);
-  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.3-alpha-code-universe' ,endpoints:['/health','/api/data/status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},time:new Date().toISOString()},request);
+export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(env.DB&&url.pathname!=='/'&&url.pathname!=='/health'){try{await ensureSecuritySchema(env.DB);}catch(e){return json({ok:false,error:`종목 분류 스키마 준비 실패: ${e.message}`},request,500);}}if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(request.method!=='GET')return json({ok:false,error:'Method Not Allowed'},request,405);
+  if(url.pathname==='/'||url.pathname==='/health')return json({ok:true,service:'chama-market-worker',version:'v11.4-common-preferred-policy' ,endpoints:['/health','/api/data/status','/api/data/universe/validate?market=KOSPI&codes=000990','/api/data/coverage','/api/data/sync?type=universe','/api/data/sync?type=quotes&limit=50','/api/data/sync?type=candles&provider=naver-legacy&code=005930&days=700&limit=1','/api/data/sync?type=indicators&limit=50','/api/data/sync?type=indicators-repair&limit=1&minCandles=120&afterCode=000000','/api/data/quote?code=005930','/api/data/candles?code=005930','/api/data/indicators?code=005930','/api/themes','/api/themes/stocks?theme_code=SEMICONDUCTOR','POST /api/themes/import (dryRun or authenticated apply)','/api/materials','/api/materials?code=005930','/api/kis/test','/api/market?codes=232140,007810','/api/analysis?codes=232140','/api/screener?market=ALL&top=10'],dataEngine:{d1:!!env.DB,kis:!!(env.KIS_APP_KEY&&env.KIS_APP_SECRET),mode:env.KIS_MODE||'paper'},securityPolicy:'KOSPI/KOSDAQ COMMON+PREFERRED only; unverified excluded',time:new Date().toISOString()},request);
   if(url.pathname==='/api/themes'){try{return json(await readThemes(env),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/themes/stocks'){try{return json(await readThemeStocks(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/materials'){try{return json(await readMaterials(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
@@ -1697,10 +1791,10 @@ export default {async fetch(request,env){const url=new URL(request.url);if(reque
   if(url.pathname==='/api/data/audit'){try{return json(await dataAudit(env,url),request);}catch(e){return json({ok:false,error:e.message},request,500);}}
   if(url.pathname==='/api/data/sync'){try{return json(await syncData(env,url),request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   if(['/api/data/quote','/api/data/candles','/api/data/indicators'].includes(url.pathname)){try{return json(await dataRead(env,url,url.pathname),request);}catch(e){return json({ok:false,error:e.message},request,400);}}
-  if(url.pathname==='/api/kis/test'){try{const q=await kisQuote(env,url.searchParams.get('code')||'005930');return json({ok:true,authenticated:true,quote:q,mode:env.KIS_MODE||'paper'},request);}catch(e){return json({ok:false,error:e.message},request,502);}}
+  if(url.pathname==='/api/kis/test'){try{const code=normalizeStockCode(url.searchParams.get('code')||'005930');await requireEligibleStock(env,code);const q=await kisQuote(env,code);return json({ok:true,authenticated:true,quote:q,mode:env.KIS_MODE||'paper'},request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   const isMarket=['/api/market','/api/market/'].includes(url.pathname), isAnalysis=['/api/analysis','/api/analysis/'].includes(url.pathname), isScreen=['/api/screener','/api/screener/'].includes(url.pathname); if(!isMarket&&!isAnalysis&&!isScreen)return json({ok:false,error:'Not Found'},request,404);
   if(isScreen){const market=(url.searchParams.get('market')||'ALL').toUpperCase();const top=Math.min(10,Math.max(1,Number(url.searchParams.get('top')||10)));let cfg={};const raw=url.searchParams.get('config');if(raw){try{cfg=JSON.parse(decodeURIComponent(raw));}catch(e){return json({ok:false,error:'config JSON 형식 오류'},request,400);}}try{return json({ok:true,...await screenMarket(market,top,cfg)},request);}catch(e){return json({ok:false,error:e?.message||String(e)},request,502);}}
   const codes=[...new Set((url.searchParams.get('codes')||'').split(',').map(normalizeStockCode).filter(isValidStockCode))];if(!codes.length)return json({ok:false,error:'codes parameter is required'},request,400);if(codes.length>80)return json({ok:false,error:'Too many codes'},request,400);
-  if(isAnalysis)return json({ok:true,quotes:await getAnalysis(codes),time:new Date().toISOString(),note:'Naver realtime + Naver daily chart; 기술분석은 재현 가능한 지표 기반입니다.'},request);
-  return json({ok:true,quotes:await getQuotes(codes),time:new Date().toISOString()},request);
+  if(isAnalysis)return json({ok:true,quotes:await getAnalysis(codes,env),time:new Date().toISOString(),note:'검증된 코스피·코스닥 보통주/우선주만 Naver realtime + daily chart로 조회합니다.'},request);
+  return json({ok:true,quotes:await getQuotes(codes,env),time:new Date().toISOString()},request);
 }};
