@@ -470,6 +470,16 @@ async function ensureSecuritySchema(db){
         cols.add(name);
       }
     }
+    // Durable indicator retry state is required by dataStatus() and indicator sync.
+    // Create it idempotently so existing production D1 databases are upgraded safely.
+    await db.prepare(`CREATE TABLE IF NOT EXISTS indicator_sync_state (
+      code TEXT PRIMARY KEY REFERENCES stocks(code) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('pending','completed')),
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      last_error TEXT
+    )`).run();
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_indicator_sync_state_status_code ON indicator_sync_state(status, code)').run();
     securitySchemaReady=true;
   })().catch(e=>{securitySchemaPromise=null;throw e;});
   return securitySchemaPromise;
