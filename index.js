@@ -1152,8 +1152,15 @@ async function historySyncJob(env,url) {
   let job=await getJob();
 
   if(action==='status') {
-    const remaining=job?.run_id ? await db.prepare("SELECT COUNT(*) AS n FROM history_sync_queue WHERE run_id=? AND status='pending'").bind(job.run_id).first() : {n:0};
-    return {ok:true,action,status:job?.status||'idle',job:job||null,pendingQueue:remaining?.n||0,dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
+    // Queue COUNT can read thousands of D1 rows. Keep routine status polling cheap;
+    // request includeQueueCount=1 only for an explicit progress audit.
+    const includeQueueCount=url.searchParams.get('includeQueueCount')==='1';
+    const remaining=includeQueueCount&&job?.run_id
+      ? await db.prepare("SELECT COUNT(*) AS n FROM history_sync_queue WHERE run_id=? AND status='pending'").bind(job.run_id).first()
+      : null;
+    return {ok:true,action,status:job?.status||'idle',job:job||null,
+      ...(includeQueueCount?{pendingQueue:remaining?.n||0}:{pendingQueue:null,pendingQueueOmitted:true}),
+      dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
   }
   if(action==='start') {
     if(job?.status==='running') throw new Error('이미 실행 중인 작업이 있습니다. 먼저 pause 하거나 status를 확인하세요.');
