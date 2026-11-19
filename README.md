@@ -7,6 +7,6 @@
 5. Verify `/health` reports `v10.7-naver-legacy-sisejson`.
 6. Test one stock with `provider=naver-legacy` before running any batch.
 
-See `PATCH_NOTES_v10.7.md` for exact test URLs and batch commands.
+See `PATCH_NOTES_v10.7.md` for legacy setup notes. See `HISTORY_BACKFILL.md` for the resumable, quota-bounded historical candle backfill procedure.
 
 Repository: `chama-common-data-engine-v10`
