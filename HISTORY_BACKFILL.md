@@ -55,7 +55,13 @@ chcp 65001
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 ```
 
-4. 아래 명령으로 25종목씩 실행합니다.
+4. 먼저 한글 출력과 작업 상태만 확인하려면 아래 명령을 실행합니다. 이 옵션은 status만 조회하며 백필 종목을 처리하지 않습니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run-history-backfill.ps1 -StatusOnly
+```
+
+5. D1 사용량이 충분하고 백필을 재개해도 되는 시점에 아래 명령으로 25종목씩 실행합니다.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\run-history-backfill.ps1 -MaxSteps 25 -DelaySeconds 2
