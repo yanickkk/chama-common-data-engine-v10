@@ -38,7 +38,7 @@ $pendingLabel = if ($null -eq $state.pendingQueue) { "상태 조회 생략(읽�
 Write-Host ("현재 상태: {0} / 처리 종목: {1} / 대기열: {2}" -f $state.status, $processedNow, $pendingLabel)
 if ($StatusOnly) {
   if ($state.job) {
-    Write-Host ("마지막 처리 종목: {0} / UTC 일일 예약 쓰기: {1}/{2}" -f $state.job.after_code, $state.job.daily_reserved_writes, $state.job.daily_budget_writes)
+    Write-Host ("마지막 처리 종목: {0} / UTC 일일 쓰기 - 예약: {1}, 계측 실제: {2}, 백필 한도: {3}" -f $state.job.after_code, $state.job.daily_reserved_writes, $state.job.daily_actual_rows_written, $state.job.daily_budget_writes)
     Write-Host ("누적 일봉 신규: {0}, 수정: {1}, 지표 재계산: {2}, 지표 행: {3}" -f $state.job.candles_inserted, $state.job.candles_updated, $state.job.indicators_recalculated, $state.job.indicator_rows_processed)
   }
   Write-Host "StatusOnly: 상태만 조회하고 백필 step은 실행하지 않았습니다."
