@@ -1281,6 +1281,8 @@ async function historySyncJob(env,url) {
 async function dataAudit(env,url) {
   const db=requireDb(env);
   const minCandles=Math.min(250,Math.max(120,Number(url.searchParams.get('minCandles')||120)));
+  // Aggregate date mismatches once by code instead of running correlated EXISTS
+  // probes for every eligible stock. Keep the exact missing/extra-date semantics.
   const rows=await db.prepare(`
     WITH candle_counts AS (
       SELECT code, COUNT(DISTINCT date) AS candle_count, MIN(date) AS first_date, MAX(date) AS last_date
@@ -1288,21 +1290,27 @@ async function dataAudit(env,url) {
     ), indicator_counts AS (
       SELECT code, COUNT(DISTINCT date) AS indicator_count, MAX(date) AS indicator_last_date
       FROM stock_indicators GROUP BY code
+    ), missing_indicator_counts AS (
+      SELECT d.code, COUNT(*) AS missing_indicator_dates
+      FROM stock_daily_candles d
+      LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
+      WHERE length(d.date)=8 AND d.close>0 AND ix.code IS NULL
+      GROUP BY d.code
+    ), extra_indicator_counts AS (
+      SELECT ix.code, COUNT(*) AS extra_indicator_dates
+      FROM stock_indicators ix
+      LEFT JOIN stock_daily_candles d ON d.code=ix.code AND d.date=ix.date
+      WHERE d.code IS NULL
+      GROUP BY ix.code
     ), per_stock AS (
       SELECT s.code,s.name,COALESCE(c.candle_count,0) AS candle_count,c.first_date,c.last_date,
              COALESCE(i.indicator_count,0) AS indicator_count,i.indicator_last_date,
-             CASE WHEN EXISTS (
-               SELECT 1 FROM stock_daily_candles d
-               LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
-               WHERE d.code=s.code AND length(d.date)=8 AND d.close>0 AND ix.code IS NULL
-             ) THEN 1 ELSE 0 END AS missing_indicator_dates,
-             CASE WHEN EXISTS (
-               SELECT 1 FROM stock_indicators ix
-               LEFT JOIN stock_daily_candles d ON d.code=ix.code AND d.date=ix.date
-               WHERE ix.code=s.code AND d.code IS NULL
-             ) THEN 1 ELSE 0 END AS extra_indicator_dates
+             COALESCE(m.missing_indicator_dates,0) AS missing_indicator_dates,
+             COALESCE(e.extra_indicator_dates,0) AS extra_indicator_dates
       FROM stocks s LEFT JOIN candle_counts c ON c.code=s.code
       LEFT JOIN indicator_counts i ON i.code=s.code
+      LEFT JOIN missing_indicator_counts m ON m.code=s.code
+      LEFT JOIN extra_indicator_counts e ON e.code=s.code
       WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'
     )
     SELECT *, CASE
@@ -1372,9 +1380,10 @@ async function dataCoverage(env) {
   const quotes=await db.prepare("SELECT COUNT(*) AS n FROM stocks s INNER JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000'").first();
   const candle=await db.prepare("SELECT COUNT(DISTINCT d.code) AS n, COUNT(*) AS rows FROM stock_daily_candles d INNER JOIN stocks s ON s.code=d.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')").first();
   const indicator=await db.prepare("SELECT COUNT(DISTINCT d.code) AS n, COUNT(*) AS rows FROM stock_indicators d INNER JOIN stocks s ON s.code=d.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ')").first();
-  const missingQuotes=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN stock_quotes q ON q.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND q.code IS NULL ORDER BY s.code LIMIT 20").all();
-  const missingCandles=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_daily_candles) c ON c.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND c.code IS NULL ORDER BY s.code LIMIT 20").all();
-  const missingIndicators=await db.prepare("SELECT s.code,s.name FROM stocks s LEFT JOIN (SELECT DISTINCT code FROM stock_indicators) i ON i.code=s.code WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND i.code IS NULL ORDER BY s.code LIMIT 20").all();
+  // Use indexed anti-lookups for missing samples; avoid DISTINCT scans of entire history tables.
+  const missingQuotes=await db.prepare("SELECT s.code,s.name FROM stocks s WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND NOT EXISTS (SELECT 1 FROM stock_quotes q WHERE q.code=s.code) ORDER BY s.code LIMIT 20").all();
+  const missingCandles=await db.prepare("SELECT s.code,s.name FROM stocks s WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND NOT EXISTS (SELECT 1 FROM stock_daily_candles c WHERE c.code=s.code) ORDER BY s.code LIMIT 20").all();
+  const missingIndicators=await db.prepare("SELECT s.code,s.name FROM stocks s WHERE s.active=1 AND s.security_verified=1 AND s.security_type IN ('COMMON','PREFERRED') AND upper(s.market) IN ('KOSPI','KOSDAQ') AND s.code<>'000000' AND NOT EXISTS (SELECT 1 FROM stock_indicators i WHERE i.code=s.code) ORDER BY s.code LIMIT 20").all();
   const n=Number(total?.n||0), q=Number(quotes?.n||0), c=Number(candle?.n||0), i=Number(indicator?.n||0);
   return {ok:true,totalStocks:n,coverage:{quotes:{stocks:q,missing:Math.max(0,n-q),percent:n?Number((q/n*100).toFixed(2)):0},candles:{stocks:c,rows:Number(candle?.rows||0),missing:Math.max(0,n-c),percent:n?Number((c/n*100).toFixed(2)):0},indicators:{stocks:i,rows:Number(indicator?.rows||0),missing:Math.max(0,n-i),percent:n?Number((i/n*100).toFixed(2)):0}},missingSamples:{quotes:missingQuotes.results||[],candles:missingCandles.results||[],indicators:missingIndicators.results||[]},note:'누락 샘플은 각 항목 최대 20종목입니다.'};
 }
