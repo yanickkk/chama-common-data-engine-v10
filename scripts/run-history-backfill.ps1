@@ -78,7 +78,7 @@ for ($i = 1; $i -le $MaxSteps; $i++) {
   }
   if ($r.status -eq "running") {
     $p = $r.progress
-    Write-Host ("[{0}/{1}] {2} {3} | 기존 {4}일 | 신규 {5} / 수정 {6} | 지표 {7}행 | 예약 {8}/{9}" -f $i, $MaxSteps, $r.code, $r.name, $r.priorCandleCount, $r.candleResult.candlesSaved, $r.candleResult.candlesUpdated, $r.candleResult.indicatorRowsProcessed, $p.dailyReservedWrites, $p.dailyBudgetWrites)
+    Write-Host ("[{0}/{1}] {2} {3} | 기존 {4}일 | 신규 {5} / 수정 {6} | 지표 {7}행 | 예약 {8} / 실제 {9} / 한도 {10}" -f $i, $MaxSteps, $r.code, $r.name, $r.priorCandleCount, $r.candleResult.candlesSaved, $r.candleResult.candlesUpdated, $r.candleResult.indicatorRowsProcessed, $p.dailyReservedWrites, $p.dailyActualRowsWritten, $p.dailyBudgetWrites)
   }
   elseif ($r.status -eq "busy") {
     Write-Host "다른 요청이 처리 중입니다. 잠시 후 다시 시도합니다."
@@ -107,5 +107,5 @@ catch {
 }
 if ($final.job) {
   Write-Host ("누적 일봉 신규: {0}, 수정: {1}, 지표 재계산 종목: {2}, 지표 행: {3}" -f $final.job.candles_inserted, $final.job.candles_updated, $final.job.indicators_recalculated, $final.job.indicator_rows_processed)
-  Write-Host ("UTC 일일 예약 쓰기량: {0}/{1}" -f $final.job.daily_reserved_writes, $final.job.daily_budget_writes)
+  Write-Host ("UTC 일일 쓰기량 - 예약: {0}, 계측 실제: {1}, 백필 한도: {2}" -f $final.job.daily_reserved_writes, $final.job.daily_actual_rows_written, $final.job.daily_budget_writes)
 }
