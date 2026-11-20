@@ -5,7 +5,7 @@ function decodeXml(value) {
     .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
 function xmlTag(block, name) {
-  const m = block.match(new RegExp('<' + name + '>([\\s\\S]*?)</' + name + '>'));
+  const m = block.match(new RegExp('<' + name + '>([\s\S]*?)</' + name + '>'));
   return m ? decodeXml(m[1].trim()) : '';
 }
 async function readZipXml(buffer) {
@@ -59,14 +59,14 @@ export async function syncDartCorpMappings(env) {
   if (!db) throw new Error('D1 DB binding이 없습니다.');
   const response = await dartRequest('/corpCode.xml', {}, env);
   const xml = await readZipXml(await response.arrayBuffer());
-  const blocks = xml.match(/<list>[\\s\\S]*?<\\/list>/g) || [];
+  const blocks = xml.match(/<list>[\s\S]*?<\/list>/g) || [];
   const listed = [];
   for (const block of blocks) {
     const corpCode = xmlTag(block, 'corp_code');
     const corpName = xmlTag(block, 'corp_name');
     const stockCode = xmlTag(block, 'stock_code');
     const modifyDate = xmlTag(block, 'modify_date');
-    if (/^\\d{8}$/.test(corpCode) && /^\\d{6}$/.test(stockCode)) listed.push({ corpCode, corpName, stockCode, modifyDate });
+    if (/^\d{8}$/.test(corpCode) && /^\d{6}$/.test(stockCode)) listed.push({ corpCode, corpName, stockCode, modifyDate });
   }
   const stockRows = await db.prepare("SELECT code,name,market,security_type,security_verified,active FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')").all();
   const eligible = new Map((stockRows.results || []).map(row => [row.code, row]));
@@ -91,7 +91,7 @@ export async function syncDartCorpMappings(env) {
 export async function searchDartDisclosures(env, url) {
   const bgn = String(url.searchParams.get('bgn_de') || '').trim();
   const end = String(url.searchParams.get('end_de') || '').trim();
-  const datePattern = /^\\d{8}$/;
+  const datePattern = /^\d{8}$/;
   if (!datePattern.test(bgn) || !datePattern.test(end) || bgn > end) throw new Error('bgn_de와 end_de는 YYYYMMDD 형식이며 시작일은 종료일 이하여야 합니다.');
   const pageNo = Math.max(1, Math.min(10000, Number(url.searchParams.get('page_no') || 1)));
   const pageCount = Math.max(1, Math.min(100, Number(url.searchParams.get('page_count') || 30)));
@@ -108,7 +108,7 @@ export async function searchDartDisclosures(env, url) {
   }
   const db = env.DB;
   const items = data.list || [];
-  const corpCodes = [...new Set(items.map(x => x.corp_code).filter(x => /^\\d{8}$/.test(String(x || ''))))];
+  const corpCodes = [...new Set(items.map(x => x.corp_code).filter(x => /^\d{8}$/.test(String(x || ''))))];
   const map = new Map();
   if (db && corpCodes.length) {
     for (const batch of Array.from({ length: Math.ceil(corpCodes.length / 80) }, (_, i) => corpCodes.slice(i * 80, (i + 1) * 80))) {
