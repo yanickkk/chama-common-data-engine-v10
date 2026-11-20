@@ -71,11 +71,12 @@ class FakeStatement {
     if (this.sql.startsWith("UPDATE INDICATOR_SYNC_STATE") &&
         this.sql.includes("STATUS='COMPLETED'")) {
       if (this.db.failCompletedWrite) throw new Error("forced completed-state write failure");
-      const [completedAt, code] = this.values;
+      const [completedAt, watermarkCode, code] = this.values;
       const state = this.db.states.get(code);
       if (!state) throw new Error(`state row missing: ${code}`);
       state.status = "completed";
       state.completed_at = completedAt;
+      state.source_updated_at = this.db.candleWatermarks.get(watermarkCode) || null;
       state.last_error = null;
       return { success: true };
     }
@@ -101,6 +102,7 @@ class FakeStatement {
 class FakeD1 {
   constructor() {
     this.states = new Map();
+    this.candleWatermarks = new Map([["005930", "2026-11-20T00:00:00.000Z"], ["000660", "2026-11-20T00:00:00.000Z"], ["035420", "2026-11-20T00:00:00.000Z"]]);
     this.indicatorRows = new Map();
     this.batchCalls = 0;
     this.failBatchNumber = 0;
@@ -153,7 +155,7 @@ async function main() {
   console.log("[1/5] 두 번째 지표 저장 배치 실패");
   db.failBatchNumber = 2;
   await assert.rejects(
-    () => saveIndicatorsWithState(db, "005930", rows, true),
+    () => saveIndicatorsWithState(db, "005930", rows, false),
     /forced indicator batch failure #2/
   );
   assert.equal(db.indicatorRows.size, 80);
@@ -175,6 +177,7 @@ async function main() {
   assert.equal(await indicatorsArePending(db, "005930"), false);
   assert.equal(db.states.get("005930").status, "completed");
   assert.ok(db.states.get("005930").completed_at);
+  assert.equal(db.states.get("005930").source_updated_at, "2026-11-20T00:00:00.000Z");
   assert.equal(db.states.get("005930").last_error, null);
   console.log("  통과: 160건 저장 후 completed 전환");
 
@@ -182,7 +185,7 @@ async function main() {
   const db2 = new FakeD1();
   db2.failPendingWrite = true;
   await assert.rejects(
-    () => saveIndicatorsWithState(db2, "000660", rows, true),
+    () => saveIndicatorsWithState(db2, "000660", rows, false),
     /pending-state write failure/
   );
   assert.equal(db2.batchCalls, 0);
@@ -193,7 +196,7 @@ async function main() {
   const db3 = new FakeD1();
   db3.failCompletedWrite = true;
   await assert.rejects(
-    () => saveIndicatorsWithState(db3, "035420", rows, true),
+    () => saveIndicatorsWithState(db3, "035420", rows, false),
     /completed-state write failure/
   );
   assert.equal(await indicatorsArePending(db3, "035420"), true);
