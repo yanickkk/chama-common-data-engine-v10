@@ -61,36 +61,81 @@ async function dartRequest(path, params, env) {
 export async function syncDartCorpMappings(env) {
   const db = env.DB;
   if (!db) throw new Error('D1 DB binding이 없습니다.');
-  const response = await dartRequest('/corpCode.xml', {}, env);
-  const xml = await readZipXml(await response.arrayBuffer());
-  const blocks = xml.match(/<list>[\s\S]*?<\/list>/g) || [];
-  const listed = [];
-  for (const block of blocks) {
-    const corpCode = xmlTag(block, 'corp_code');
-    const corpName = xmlTag(block, 'corp_name');
-    const stockCode = xmlTag(block, 'stock_code');
-    const modifyDate = xmlTag(block, 'modify_date');
-    if (/^\d{8}$/.test(corpCode) && /^\d{6}$/.test(stockCode)) listed.push({ corpCode, corpName, stockCode, modifyDate });
+
+  let stage = 'DART ZIP 다운로드';
+  try {
+    const response = await dartRequest('/corpCode.xml', {}, env);
+
+    stage = 'ZIP 압축 해제 및 XML 디코딩';
+    const xml = await readZipXml(await response.arrayBuffer());
+
+    stage = '적격 종목 목록 조회';
+    const stockRows = await db.prepare("SELECT code,name,market,security_type,security_verified,active FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')").all();
+    const eligible = new Map((stockRows.results || []).map(row => [row.code, row]));
+
+    // DART XML 전체를 정규식 match()로 분할하면 12만 개의 문자열 배열이
+    // 한꺼번에 생성됩니다. indexOf()로 한 레코드씩 읽어 메모리 사용량을 제한합니다.
+    stage = '기업코드 XML 순차 파싱 및 D1 저장';
+    const now = new Date().toISOString();
+    let cursor = 0;
+    let parsedListedCompanies = 0;
+    let mapped = 0;
+    let reviewRequired = 0;
+    let processedRecords = 0;
+    let batch = [];
+
+    while (true) {
+      const recordStart = xml.indexOf('<list>', cursor);
+      if (recordStart < 0) break;
+      const contentStart = recordStart + 6;
+      const recordEnd = xml.indexOf('</list>', contentStart);
+      if (recordEnd < 0) throw new Error('기업코드 XML의 list 레코드가 정상적으로 닫히지 않았습니다.');
+
+      const block = xml.slice(contentStart, recordEnd);
+      cursor = recordEnd + 7;
+      processedRecords++;
+
+      const corpCode = xmlTag(block, 'corp_code');
+      const corpName = xmlTag(block, 'corp_name');
+      const stockCode = xmlTag(block, 'stock_code');
+      const modifyDate = xmlTag(block, 'modify_date');
+      if (!/^\d{8}$/.test(corpCode) || !/^\d{6}$/.test(stockCode)) continue;
+
+      parsedListedCompanies++;
+      const stock = eligible.get(stockCode);
+      const status = stock ? 'MAPPED' : 'REVIEW';
+      if (stock) mapped++;
+      else reviewRequired++;
+
+      batch.push(db.prepare(`INSERT INTO dart_corp_mappings
+        (corp_code,corp_name,stock_code,modify_date,mapping_status,security_type,market,source_type,synced_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,'DART_CORPCODE',?,?)
+        ON CONFLICT(corp_code) DO UPDATE SET corp_name=excluded.corp_name,stock_code=excluded.stock_code,
+        modify_date=excluded.modify_date,mapping_status=excluded.mapping_status,security_type=excluded.security_type,
+        market=excluded.market,synced_at=excluded.synced_at,updated_at=excluded.updated_at`)
+        .bind(corpCode,corpName,stockCode,modifyDate,status,stock?.security_type || null,stock?.market || null,now,now));
+
+      if (batch.length >= 50) {
+        await db.batch(batch);
+        batch = [];
+      }
+    }
+
+    if (batch.length) await db.batch(batch);
+
+    return {
+      ok: true,
+      source: 'DART_CORPCODE',
+      processedRecords,
+      parsedListedCompanies,
+      mappedEligibleStocks: mapped,
+      reviewRequired,
+      syncedAt: now,
+      note: '검증된 KOSPI/KOSDAQ 보통주·우선주만 MAPPED로 연결했습니다. REVIEW 항목은 자동 종목 연결에 사용하지 않습니다.'
+    };
+  } catch (error) {
+    throw new Error('DART 기업코드 동기화 [' + stage + '] 단계 실패: ' + String(error?.message || error));
   }
-  const stockRows = await db.prepare("SELECT code,name,market,security_type,security_verified,active FROM stocks WHERE active=1 AND security_verified=1 AND security_type IN ('COMMON','PREFERRED') AND upper(market) IN ('KOSPI','KOSDAQ')").all();
-  const eligible = new Map((stockRows.results || []).map(row => [row.code, row]));
-  const now = new Date().toISOString();
-  let mapped = 0, excluded = 0;
-  const statements = [];
-  for (const row of listed) {
-    const stock = eligible.get(row.stockCode);
-    const status = stock ? 'MAPPED' : 'REVIEW';
-    if (stock) mapped++; else excluded++;
-    statements.push(db.prepare(`INSERT INTO dart_corp_mappings
-      (corp_code,corp_name,stock_code,modify_date,mapping_status,security_type,market,source_type,synced_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,'DART_CORPCODE',?,?)
-      ON CONFLICT(corp_code) DO UPDATE SET corp_name=excluded.corp_name,stock_code=excluded.stock_code,
-      modify_date=excluded.modify_date,mapping_status=excluded.mapping_status,security_type=excluded.security_type,
-      market=excluded.market,synced_at=excluded.synced_at,updated_at=excluded.updated_at`)
-      .bind(row.corpCode,row.corpName,row.stockCode,row.modifyDate,status,stock?.security_type || null,stock?.market || null,now,now));
-  }
-  for (let i = 0; i < statements.length; i += 50) await db.batch(statements.slice(i, i + 50));
-  return { ok: true, source: 'DART_CORPCODE', parsedListedCompanies: listed.length, mappedEligibleStocks: mapped, reviewRequired: excluded, syncedAt: now, note: '검증된 KOSPI/KOSDAQ 보통주·우선주만 MAPPED로 연결했습니다. REVIEW 항목은 자동 종목 연결에 사용하지 않습니다.' };
 }
 export async function searchDartDisclosures(env, url) {
   const bgn = String(url.searchParams.get('bgn_de') || '').trim();
