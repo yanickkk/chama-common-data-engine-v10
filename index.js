@@ -1289,7 +1289,7 @@ const INFRASTRUCTURE_INVESTMENT_NAMES = new Set([
 function isPreferredStockName(name) {
   const normalized=String(name||'').replace(/\s+/g,'').toUpperCase();
   if(PREFERRED_STOCK_NAME_EXCEPTIONS.has(normalized)) return false;
-  return /우선주|우(?:B|C)?(?:\(전환\))?$/.test(normalized);
+  return /(?:우선주|[1-9]?우(?:B|C)?(?:\(전환\))?)$/.test(normalized);
 }
 
 const NON_EQUITY_SECURITY_RE=/(ETF|ETN|ELW|스팩|SPAC|기업인수목적|인덱스|X클래스|(?:리츠|REIT)$|이리츠코크렙|부동산투자회사|투자회사|채권|국채|회사채|선물|펀드|투자신탁|수익증권)/i;
