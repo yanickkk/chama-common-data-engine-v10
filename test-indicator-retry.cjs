@@ -171,7 +171,7 @@ async function main() {
   console.log("[3/5] 재시도 성공");
   db.failBatchNumber = 0;
   db.batchCalls = 0;
-  const saved = await saveIndicatorsWithState(db, "005930", rows, true);
+  const saved = await saveIndicatorsWithState(db, "005930", rows, false);
   assert.equal(saved, 160);
   assert.equal(db.indicatorRows.size, 160);
   assert.equal(await indicatorsArePending(db, "005930"), false);
