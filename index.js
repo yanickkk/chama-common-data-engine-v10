@@ -607,11 +607,108 @@ function calculateIndicatorRows(code,candles) {
   return rows.map((x,i)=>({code,date:x.date,ema5:e5[i],ema10:e10[i],ema20:e20[i],ema60:e60[i],ema120:e120[i],rsi14:rsi[i],macd:macd[i],macdSignal:macdSignal[i],macdHist:macdHist[i]}));
 }
 async function d1Batch(db,statements,batchSize=80){for(let i=0;i<statements.length;i+=batchSize)await db.batch(statements.slice(i,i+batchSize));}
-async function saveUniverse(db,rows) {
-  const eligible=(rows||[]).filter(isEligibleCommonStock);
-  const stmts=eligible.map(x=>db.prepare(`INSERT INTO stocks(code,name,market,market_cap,listed_shares,active,updated_at,security_type,security_verified,security_source,security_reason) VALUES(?,?,?,?,?,1,?,?,1,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,market_cap=COALESCE(excluded.market_cap,stocks.market_cap),listed_shares=COALESCE(excluded.listed_shares,stocks.listed_shares),active=1,updated_at=excluded.updated_at,security_type=excluded.security_type,security_verified=1,security_source=excluded.security_source,security_reason=excluded.security_reason`).bind(x.code,x.name,x.market,x.marketValue??null,x.listedShares??null,isoNow(),x.securityType,x.securitySource||'NAVER-INDIVIDUAL-STOCKS-V3',x.securityType==='PREFERRED'?'우선주 확인':'개별주식 목록의 보통주 확인'));
-  // 유니버스 전체 갱신 시 비활성화·삭제·스키마 확인 쿼리를 포함해도 Worker 요청 한도를 넘지 않도록 배치 크기를 100으로 유지합니다.
-  await d1Batch(db,stmts,100); return eligible.length;
+async function saveUniverse(db,rows,market='ALL') {
+  // 전체 종목 마스터를 한 번 읽고, 실제 변경/신규 종목만 D1에 기록합니다.
+  // 기존 행 전체를 읽는 것은 수천 행 수준의 읽기이며, 매번 전체 UPSERT하는 쓰기를 크게 줄입니다.
+  const existingResult=await db.prepare(`
+    SELECT code,name,market,market_cap,listed_shares,active,
+      security_type,security_verified,security_source,security_reason
+    FROM stocks
+  `).all();
+  const existingRows=existingResult.results||[];
+  const existingByCode=new Map(existingRows.map(x=>[normalizeStockCode(x.code),x]));
+  const eligibleByCode=new Map();
+  for(const x of rows||[])if(isEligibleCommonStock(x))eligibleByCode.set(normalizeStockCode(x.code),x);
+  const eligible=[...eligibleByCode.values()];
+  const eligibleCodes=new Set(eligibleByCode.keys());
+  const now=isoNow();
+  const stmts=[];
+  let inserted=0,updated=0,unchanged=0;
+
+  const same=(a,b)=>(a==null&&b==null)||(a!=null&&b!=null&&String(a)===String(b));
+  for(const x of eligible){
+    const code=normalizeStockCode(x.code);
+    const old=existingByCode.get(code);
+    const securitySource=x.securitySource||'NAVER-INDIVIDUAL-STOCKS-V3';
+    const securityReason=x.securityType==='PREFERRED'?'우선주 확인':'개별주식 목록의 보통주 확인';
+    if(old){
+      // NULL 입력은 기존 market_cap/listed_shares를 보존하는 기존 COALESCE 정책과 동일하게 비교합니다.
+      const effectiveMarketCap=x.marketValue??old.market_cap??null;
+      const effectiveListedShares=x.listedShares??old.listed_shares??null;
+      const changed=
+        !same(old.name,x.name)||
+        !same(old.market,x.market)||
+        !same(old.market_cap,effectiveMarketCap)||
+        !same(old.listed_shares,effectiveListedShares)||
+        Number(old.active)!==1||
+        !same(old.security_type,x.securityType)||
+        Number(old.security_verified)!==1||
+        !same(old.security_source,securitySource)||
+        !same(old.security_reason,securityReason);
+      if(!changed){unchanged++;continue;}
+      updated++;
+    }else{
+      inserted++;
+    }
+
+    stmts.push(db.prepare(`
+      INSERT INTO stocks(
+        code,name,market,market_cap,listed_shares,active,updated_at,
+        security_type,security_verified,security_source,security_reason
+      ) VALUES(?,?,?,?,?,1,?,?,1,?,?)
+      ON CONFLICT(code) DO UPDATE SET
+        name=excluded.name,
+        market=excluded.market,
+        market_cap=COALESCE(excluded.market_cap,stocks.market_cap),
+        listed_shares=COALESCE(excluded.listed_shares,stocks.listed_shares),
+        active=1,
+        updated_at=excluded.updated_at,
+        security_type=excluded.security_type,
+        security_verified=1,
+        security_source=excluded.security_source,
+        security_reason=excluded.security_reason
+      WHERE stocks.name IS NOT excluded.name
+        OR stocks.market IS NOT excluded.market
+        OR (excluded.market_cap IS NOT NULL AND stocks.market_cap IS NOT excluded.market_cap)
+        OR (excluded.listed_shares IS NOT NULL AND stocks.listed_shares IS NOT excluded.listed_shares)
+        OR stocks.active IS NOT 1
+        OR stocks.security_type IS NOT excluded.security_type
+        OR stocks.security_verified IS NOT 1
+        OR stocks.security_source IS NOT excluded.security_source
+        OR stocks.security_reason IS NOT excluded.security_reason
+    `).bind(
+      code,x.name,x.market,x.marketValue??null,x.listedShares??null,now,
+      x.securityType,securitySource,securityReason
+    ));
+  }
+
+  // 신규/변경 종목 저장이 모두 성공한 뒤에만 오래된 활성 종목을 비활성화합니다.
+  await d1Batch(db,stmts,100);
+  const staleCodes=existingRows
+    .filter(x=>Number(x.active)===1&&Number(x.security_verified)===1)
+    .filter(x=>market==='ALL'||String(x.market||'').toUpperCase()===market)
+    .map(x=>normalizeStockCode(x.code))
+    .filter(code=>!eligibleCodes.has(code));
+  const staleStatements=chunks(staleCodes,100).map(batch=>{
+    const placeholders=batch.map(()=>'?').join(',');
+    return db.prepare(`
+      UPDATE stocks
+      SET active=0,security_verified=0,security_type='UNVERIFIED',
+        security_source='UNVERIFIED',
+        security_reason='최신 종목 마스터에서 재검증 전'
+      WHERE active=1 AND security_verified=1 AND code IN (${placeholders})
+    `).bind(...batch);
+  });
+  await d1Batch(db,staleStatements,80);
+
+  return {
+    eligibleCount:eligible.length,
+    inserted,
+    updated,
+    unchanged,
+    deactivated:staleCodes.length,
+    writeStatements:stmts.length+staleStatements.length
+  };
 }
 async function saveQuotes(db,rows) {
   const stmts=rows.filter(x=>x.price!=null).map(x=>db.prepare(`INSERT INTO stock_quotes(code,price,previous_close,change_value,change_pct,volume,trade_value,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET price=excluded.price,previous_close=excluded.previous_close,change_value=excluded.change_value,change_pct=excluded.change_pct,volume=excluded.volume,trade_value=excluded.trade_value,source=excluded.source,updated_at=excluded.updated_at`).bind(x.code,x.price,x.previousClose??null,x.change??null,x.changePct??null,x.volume??0,x.tradeValue??x.value??0,x.source||'UNKNOWN',x.updatedAt||isoNow()));
@@ -874,18 +971,15 @@ async function syncData(env,url) {
   const limit=Math.min(maxBatch,requestedLimit);
   if(type==='universe'){
     const market=(url.searchParams.get('market')||'ALL').toUpperCase(); const u=await fetchUniverse(market); if(!u.complete)throw new Error('종목 유니버스 페이지 수집이 불완전하여 D1 저장을 중단했습니다. '+(u.errors||[]).join(' | '));
-    // 먼저 검증된 현재 유니버스를 모두 저장합니다. 저장 중 D1 오류가 나면
-    // 기존 활성 종목은 그대로 유지하고, 저장이 완전히 끝난 뒤에만 오래된 종목을 비활성화합니다.
-    const syncStartedAt=isoNow();
-    const saved=await saveUniverse(db,u.rows);
+    // 완전한 원본 수집 후 신규/변경 종목만 저장하고, 저장 성공 뒤 누락 종목만 비활성화합니다.
+    const saveResult=await saveUniverse(db,u.rows,market);
+    const saved=saveResult.eligibleCount;
     await db.prepare("DELETE FROM stocks WHERE code='000000'").run();
-    if(market==='ALL')await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1 AND security_verified=1 AND updated_at < ?").bind(syncStartedAt).run();
-    else await db.prepare("UPDATE stocks SET active=0,security_verified=0,security_type='UNVERIFIED',security_source='UNVERIFIED',security_reason='최신 종목 마스터에서 재검증 전' WHERE active=1 AND security_verified=1 AND upper(market)=? AND updated_at < ?").bind(market,syncStartedAt).run();
     const commonStocks=u.rows.filter(x=>x.securityType==='COMMON'&&isEligibleCommonStock(x)).length;
     const preferredStocks=u.rows.filter(x=>x.securityType==='PREFERRED'&&isEligibleCommonStock(x)).length;
     const unverifiedExcluded=u.rows.filter(x=>x.securityType==='UNVERIFIED').length;
     const productExcluded=u.rows.filter(x=>x.securityType==='EXCLUDED').length;
-    return {ok:true,type,market,discovered:u.rows.length,found:saved,saved,commonStocks,preferredStocks,unverifiedExcluded,productExcluded,policy:'KOSPI/KOSDAQ 보통주+우선주만 포함; 미확인 분류 제외',pages:u.pages,totalCount:u.totalCount,sourceUniqueCount:u.sourceUniqueCount,coverage:u.coverage,errors:(u.errors||[]).slice(0,10),source:u.source,at:isoNow()};
+    return {ok:true,type,market,discovered:u.rows.length,found:saved,saved,inserted:saveResult.inserted,updated:saveResult.updated,unchanged:saveResult.unchanged,deactivated:saveResult.deactivated,d1WriteStatements:saveResult.writeStatements,commonStocks,preferredStocks,unverifiedExcluded,productExcluded,policy:'KOSPI/KOSDAQ 보통주+우선주만 포함; 미확인 분류 제외',pages:u.pages,totalCount:u.totalCount,sourceUniqueCount:u.sourceUniqueCount,coverage:u.coverage,errors:(u.errors||[]).slice(0,10),source:u.source,at:isoNow()};
   }
   if(type==='indicators-repair'){
     // Keyset pagination: 완료된 종목은 후보 목록에서 빠져도 다음 종목을 건너뛰지 않습니다.
