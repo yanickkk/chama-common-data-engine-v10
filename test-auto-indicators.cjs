@@ -279,7 +279,16 @@ function makeDate(index) {
     "변경된 지표가 가상 DB에 저장됨"
   );
 
-  console.log("\n========== 4. 동일 데이터 재입력 ==========");
+  console.log("\n========== 4. 동일 지표값 재저장 시 no-op 쓰기 방지 ==========");
+  db.resetIndicatorWrites();
+  const unchangedRows = calculateIndicatorRows("005930", db.candles.values());
+  await saveIndicators(db, "005930", unchangedRows, false);
+  assert(
+    db.indicatorWrites === 0,
+    "동일한 지표값 재저장 시 실제 지표 행 변경 없음"
+  );
+
+  console.log("\n========== 5. 동일 데이터 재입력 ==========");
 
   db.resetIndicatorWrites();
 
