@@ -479,6 +479,16 @@ async function ensureSecuritySchema(db){
       completed_at TEXT,
       last_error TEXT
     )`).run();
+    const indicatorStateInfo=await db.prepare('PRAGMA table_info(indicator_sync_state)').all();
+    const indicatorStateCols=new Set((indicatorStateInfo.results||[]).map(x=>String(x.name)));
+    if(!indicatorStateCols.has('source_updated_at')){
+      try{await db.prepare('ALTER TABLE indicator_sync_state ADD COLUMN source_updated_at TEXT').run();}
+      catch(error){
+        const fresh=await db.prepare('PRAGMA table_info(indicator_sync_state)').all();
+        const freshCols=new Set((fresh.results||[]).map(x=>String(x.name)));
+        if(!freshCols.has('source_updated_at'))throw error;
+      }
+    }
     await db.prepare('CREATE INDEX IF NOT EXISTS idx_indicator_sync_state_status_code ON indicator_sync_state(status, code)').run();
     await db.prepare(`CREATE TABLE IF NOT EXISTS history_sync_queue (
       run_id TEXT NOT NULL,
@@ -750,11 +760,15 @@ async function markIndicatorsPending(db,code) {
   `).bind(code,now).run();
 }
 async function markIndicatorsCompleted(db,code) {
+  // Save the candle-data watermark only after every indicator batch succeeds.
+  // This replaces per-indicator-row timestamp refreshes as the repair watermark.
   await db.prepare(`
     UPDATE indicator_sync_state
-    SET status='completed',completed_at=?,last_error=NULL
+    SET status='completed',completed_at=?,source_updated_at=(
+      SELECT MAX(updated_at) FROM stock_daily_candles WHERE code=?
+    ),last_error=NULL
     WHERE code=?
-  `).bind(isoNow(),code).run();
+  `).bind(isoNow(),code,code).run();
 }
 async function markIndicatorsError(db,code,error) {
   // Keep status='pending'; a diagnostic write must never clear the retry state.
@@ -955,11 +969,29 @@ async function syncData(env,url) {
             LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
             WHERE d.code=s.code AND length(d.date)=8 AND d.close>0 AND ix.code IS NULL
           )
-          OR EXISTS (
-            SELECT 1 FROM stock_daily_candles d
-            LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
-            WHERE d.code=s.code AND length(d.date)=8 AND d.close>0
-              AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
+          OR (
+            EXISTS (
+              SELECT 1 FROM indicator_sync_state st
+              WHERE st.code=s.code AND st.status='completed' AND st.source_updated_at IS NOT NULL
+            )
+            AND COALESCE((
+              SELECT MAX(updated_at) FROM stock_daily_candles WHERE code=s.code
+            ),'') > COALESCE((
+              SELECT source_updated_at FROM indicator_sync_state
+              WHERE code=s.code AND status='completed'
+            ),'')
+          )
+          OR (
+            NOT EXISTS (
+              SELECT 1 FROM indicator_sync_state st
+              WHERE st.code=s.code AND st.status='completed' AND st.source_updated_at IS NOT NULL
+            )
+            AND EXISTS (
+              SELECT 1 FROM stock_daily_candles d
+              LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
+              WHERE d.code=s.code AND length(d.date)=8 AND d.close>0
+                AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
+            )
           )
           OR EXISTS (
             SELECT 1 FROM stock_indicators ix
@@ -984,7 +1016,7 @@ async function syncData(env,url) {
         if(validCount<minCandles){skipped++;continue;}
         const rows=calculateIndicatorRows(stock.code,candles);
         if(rows.length<minCandles){skipped++;continue;}
-        saved+=await saveIndicatorsWithState(db,stock.code,rows,true);
+        saved+=await saveIndicatorsWithState(db,stock.code,rows,false);
         processed++;if(rows.length<250)limitedHistory++;
       }catch(e){errors.push({code:stock.code,name:stock.name,error:e.message});}
     }
@@ -1048,12 +1080,39 @@ async function syncData(env,url) {
           try{
             const pendingResult=await db.prepare(`
               SELECT 1 AS pending
-              FROM stock_daily_candles d
-              LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
-              WHERE d.code=? AND length(d.date)=8 AND d.close>0
-                AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
+              WHERE
+                EXISTS (
+                  SELECT 1 FROM stock_daily_candles d
+                  LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
+                  WHERE d.code=? AND length(d.date)=8 AND d.close>0
+                    AND ix.code IS NULL
+                )
+                OR (
+                  EXISTS (
+                    SELECT 1 FROM indicator_sync_state st
+                    WHERE st.code=? AND st.status='completed' AND st.source_updated_at IS NOT NULL
+                  )
+                  AND COALESCE((
+                    SELECT MAX(updated_at) FROM stock_daily_candles WHERE code=?
+                  ),'') > COALESCE((
+                    SELECT source_updated_at FROM indicator_sync_state
+                    WHERE code=? AND status='completed'
+                  ),'')
+                )
+                OR (
+                  NOT EXISTS (
+                    SELECT 1 FROM indicator_sync_state st
+                    WHERE st.code=? AND st.status='completed' AND st.source_updated_at IS NOT NULL
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM stock_daily_candles d
+                    LEFT JOIN stock_indicators ix ON ix.code=d.code AND ix.date=d.date
+                    WHERE d.code=? AND length(d.date)=8 AND d.close>0
+                      AND (ix.code IS NULL OR COALESCE(d.updated_at,'')>COALESCE(ix.updated_at,''))
+                  )
+                )
               LIMIT 1
-            `).bind(s.code).all();
+            `).bind(s.code,s.code,s.code,s.code,s.code,s.code).all();
             d1RowsRead+=Number(pendingResult.meta?.rows_read||0);
             indicatorsPending=indicatorsPending||(pendingResult.results||[]).length>0;
           }catch(e){
@@ -1081,7 +1140,7 @@ async function syncData(env,url) {
               if(indicatorRows.length<minCandles){
                 indicatorStocksSkipped++;
               }else{
-                await saveIndicatorsWithState(db,s.code,indicatorRows,true);
+                await saveIndicatorsWithState(db,s.code,indicatorRows,false);
                 indicatorStocksRecalculated++;
                 indicatorRowsProcessed+=indicatorRows.length;
               }
