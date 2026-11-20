@@ -1289,10 +1289,10 @@ const INFRASTRUCTURE_INVESTMENT_NAMES = new Set([
 function isPreferredStockName(name) {
   const normalized=String(name||'').replace(/\s+/g,'').toUpperCase();
   if(PREFERRED_STOCK_NAME_EXCEPTIONS.has(normalized)) return false;
-  return /우선주|우(?:B|C)?$/.test(normalized);
+  return /우선주|우(?:B|C)?(?:\(전환\))?$/.test(normalized);
 }
 
-const NON_EQUITY_SECURITY_RE=/(ETF|ETN|ELW|스팩|SPAC|기업인수목적|(?:리츠|REIT)$|이리츠코크렙|부동산투자회사|투자회사|채권|국채|회사채|선물|펀드|투자신탁|수익증권)/i;
+const NON_EQUITY_SECURITY_RE=/(ETF|ETN|ELW|스팩|SPAC|기업인수목적|인덱스|X클래스|(?:리츠|REIT)$|이리츠코크렙|부동산투자회사|투자회사|채권|국채|회사채|선물|펀드|투자신탁|수익증권)/i;
 const SECURITY_TYPE_FIELDS=['securityType','securityTypeName','securityTypeCode','stockType','stockTypeName','stockTypeCode','itemType','itemTypeName','itemTypeCode','issueType','issueTypeName','securityKind','productType','stockKind','stockEndType','endType'];
 function classifySecurityType(item={},krx={},name='',source=''){
   const market=String(item.marketType??item.market??'').toUpperCase();
@@ -1302,7 +1302,7 @@ function classifySecurityType(item={},krx={},name='',source=''){
   const status=String(krx.tradableStatus??item.tradableStatus??'').trim().toLowerCase();
   const statusCode=String(krx.tradableStatusCode??item.tradableStatusCode??'').trim().toLowerCase();
   if((status&&status!=='tradable')||(statusCode&&statusCode!=='ok'))return 'UNVERIFIED';
-  const values=SECURITY_TYPE_FIELDS.map(k=>item?.[k]??krx?.[k]).filter(v=>v!==undefined&&v!==null&&String(v).trim()!=='').map(v=>String(v).trim().toUpperCase().replace(/[\\s-]+/g,'_'));
+  const values=SECURITY_TYPE_FIELDS.map(k=>item?.[k]??krx?.[k]).filter(v=>v!==undefined&&v!==null&&String(v).trim()!=='').map(v=>String(v).trim().toUpperCase().replace(/[\s-]+/g,'_'));
   const joined=values.join('|');
   if(/ETF|ETN|ELW|SPAC|REIT|FUND|BOND|FUTURE|OPTION|WARRANT|투자신탁|상장지수|주식워런트|기업인수목적|리츠|펀드|채권|선물|파생/.test(joined))return 'EXCLUDED';
   if(/PREFERRED|PREF|PREFERENCE|우선주|우선/.test(joined)||isPreferredStockName(normalized))return 'PREFERRED';
