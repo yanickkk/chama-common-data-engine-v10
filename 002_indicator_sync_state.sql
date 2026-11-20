@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS indicator_sync_state (
   status TEXT NOT NULL CHECK(status IN ('pending','completed')),
   started_at TEXT NOT NULL,
   completed_at TEXT,
+  source_updated_at TEXT,
   last_error TEXT
 );
 
