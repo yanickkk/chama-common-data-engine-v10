@@ -1797,7 +1797,7 @@ async function readMaterials(env,url) {
 
 export default {async fetch(request,env){const url=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:corsHeaders(request)});if(env.DB&&url.pathname!=='/'&&url.pathname!=='/health'){try{await ensureSecuritySchema(env.DB);}catch(e){return json({ok:false,error:`종목 분류 스키마 준비 실패: ${e.message}`},request,500);}}if(url.pathname==='/api/themes/import'&&request.method==='POST'){try{const body=await request.json();if(body.dryRun===false){const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'테마 가져오기 적용에는 THEME_ADMIN_TOKEN 인증이 필요합니다.'},request,401);}return json(await importNaverThemes(env,body),request);}catch(e){return json({ok:false,error:e.message},request,502);}}if(url.pathname==='/api/materials/dart/corp-mappings/sync'){
     if(request.method!=='POST')return json({ok:false,error:'Method Not Allowed'},request,405);
-    const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\\s+/i,'');
+    const token=String(request.headers.get('Authorization')||'').replace(/^Bearer\s+/i,'');
     if(!env.THEME_ADMIN_TOKEN||token!==env.THEME_ADMIN_TOKEN)return json({ok:false,error:'DART 종목 매핑 동기화에는 관리자 인증이 필요합니다.'},request,401);
     try{return json(await syncDartCorpMappings(env),request);}catch(e){return json({ok:false,error:e.message},request,502);}
   }
