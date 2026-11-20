@@ -516,7 +516,7 @@ async function ensureSecuritySchema(db){
       indicator_rows_processed INTEGER NOT NULL DEFAULT 0,
       day_key TEXT NOT NULL,
       daily_reserved_writes INTEGER NOT NULL DEFAULT 0,
-      daily_budget_writes INTEGER NOT NULL DEFAULT 70000,
+      daily_budget_writes INTEGER NOT NULL DEFAULT 25000,
       reserve_per_stock INTEGER NOT NULL DEFAULT 5000,
       daily_actual_rows_written INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
