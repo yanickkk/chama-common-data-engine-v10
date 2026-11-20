@@ -648,7 +648,18 @@ function calculateIndicatorRows(code,candles) {
   }
   return rows.map((x,i)=>({code,date:x.date,ema5:e5[i],ema10:e10[i],ema20:e20[i],ema60:e60[i],ema120:e120[i],rsi14:rsi[i],macd:macd[i],macdSignal:macdSignal[i],macdHist:macdHist[i]}));
 }
-async function d1Batch(db,statements,batchSize=80){for(let i=0;i<statements.length;i+=batchSize)await db.batch(statements.slice(i,i+batchSize));}
+function addD1WriteMetrics(metrics,result){
+  if(!metrics||!result?.meta)return;
+  metrics.rowsWritten+=Number(result.meta.rows_written??result.meta.changes??0);
+  metrics.changes+=Number(result.meta.changes||0);
+  metrics.statements++;
+}
+async function d1Batch(db,statements,batchSize=80,metrics=null){
+  for(let i=0;i<statements.length;i+=batchSize){
+    const results=await db.batch(statements.slice(i,i+batchSize));
+    if(metrics&&Array.isArray(results))for(const result of results)addD1WriteMetrics(metrics,result);
+  }
+}
 async function saveUniverse(db,rows) {
   const eligible=(rows||[]).filter(isEligibleCommonStock);
   const stmts=eligible.map(x=>db.prepare(`INSERT INTO stocks(code,name,market,market_cap,listed_shares,active,updated_at,security_type,security_verified,security_source,security_reason) VALUES(?,?,?,?,?,1,?,?,1,?,?) ON CONFLICT(code) DO UPDATE SET name=excluded.name,market=excluded.market,market_cap=COALESCE(excluded.market_cap,stocks.market_cap),listed_shares=COALESCE(excluded.listed_shares,stocks.listed_shares),active=1,updated_at=excluded.updated_at,security_type=excluded.security_type,security_verified=1,security_source=excluded.security_source,security_reason=excluded.security_reason`).bind(x.code,x.name,x.market,x.marketValue??null,x.listedShares??null,isoNow(),x.securityType,x.securitySource||'NAVER-INDIVIDUAL-STOCKS-V3',x.securityType==='PREFERRED'?'우선주 확인':'개별주식 목록의 보통주 확인'));
@@ -659,7 +670,7 @@ async function saveQuotes(db,rows) {
   const stmts=rows.filter(x=>x.price!=null).map(x=>db.prepare(`INSERT INTO stock_quotes(code,price,previous_close,change_value,change_pct,volume,trade_value,source,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET price=excluded.price,previous_close=excluded.previous_close,change_value=excluded.change_value,change_pct=excluded.change_pct,volume=excluded.volume,trade_value=excluded.trade_value,source=excluded.source,updated_at=excluded.updated_at`).bind(x.code,x.price,x.previousClose??null,x.change??null,x.changePct??null,x.volume??0,x.tradeValue??x.value??0,x.source||'UNKNOWN',x.updatedAt||isoNow()));
   await d1Batch(db,stmts); return stmts.length;
 }
-async function saveCandles(db,code,rows) {
+async function saveCandles(db,code,rows,metrics=null) {
   // 원본에서 받은 날짜 구간만 비교합니다. 과거에 더 긴 이력이 있어도 불필요한 행을 읽지 않습니다.
   const byDate=new Map();
   for(const x of rows||[]){
@@ -728,7 +739,7 @@ async function saveCandles(db,code,rows) {
     x.volume||0,(x.tradeValue??existing.get(String(x.date))?.trade_value??0),'NAVER',isoNow()
   ));
 
-  if(stmts.length) await d1Batch(db,stmts);
+  if(stmts.length) await d1Batch(db,stmts,80,metrics);
 
   return {
     inserted:toWrite.length-updated,
@@ -737,17 +748,17 @@ async function saveCandles(db,code,rows) {
     rowsRead:Number(existingResult.meta?.rows_read||0)
   };
 }
-async function saveIndicators(db,code,rows,refreshTimestamp=false) {
+async function saveIndicators(db,code,rows,refreshTimestamp=false,metrics=null) {
   const changedOnly=refreshTimestamp?'':` WHERE stock_indicators.ema5 IS NOT excluded.ema5 OR stock_indicators.ema10 IS NOT excluded.ema10 OR stock_indicators.ema20 IS NOT excluded.ema20 OR stock_indicators.ema60 IS NOT excluded.ema60 OR stock_indicators.ema120 IS NOT excluded.ema120 OR stock_indicators.rsi14 IS NOT excluded.rsi14 OR stock_indicators.macd IS NOT excluded.macd OR stock_indicators.macd_signal IS NOT excluded.macd_signal OR stock_indicators.macd_hist IS NOT excluded.macd_hist`;
   const stmts=rows.map(x=>db.prepare(`INSERT INTO stock_indicators(code,date,ema5,ema10,ema20,ema60,ema120,rsi14,macd,macd_signal,macd_hist,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code,date) DO UPDATE SET ema5=excluded.ema5,ema10=excluded.ema10,ema20=excluded.ema20,ema60=excluded.ema60,ema120=excluded.ema120,rsi14=excluded.rsi14,macd=excluded.macd,macd_signal=excluded.macd_signal,macd_hist=excluded.macd_hist,updated_at=excluded.updated_at${changedOnly}`).bind(code,x.date,x.ema5,x.ema10,x.ema20,x.ema60,x.ema120,x.rsi14,x.macd,x.macdSignal,x.macdHist,isoNow()));
-  await d1Batch(db,stmts); return stmts.length;
+  await d1Batch(db,stmts,80,metrics); return stmts.length;
 }
 
 /**
  * Durable per-stock indicator recalculation state.
  * The pending write is committed before chunked indicator writes begin.
  */
-async function markIndicatorsPending(db,code) {
+async function markIndicatorsPending(db,code,metrics=null) {
   const now=isoNow();
   await db.prepare(`
     INSERT INTO indicator_sync_state(code,status,started_at,completed_at,last_error)
@@ -757,9 +768,9 @@ async function markIndicatorsPending(db,code) {
       started_at=excluded.started_at,
       completed_at=NULL,
       last_error=NULL
-  `).bind(code,now).run();
+  `).bind(code,now).run().then(result=>{addD1WriteMetrics(metrics,result);return result;});
 }
-async function markIndicatorsCompleted(db,code) {
+async function markIndicatorsCompleted(db,code,metrics=null) {
   // Save the candle-data watermark only after every indicator batch succeeds.
   // This replaces per-indicator-row timestamp refreshes as the repair watermark.
   await db.prepare(`
@@ -768,15 +779,15 @@ async function markIndicatorsCompleted(db,code) {
       SELECT MAX(updated_at) FROM stock_daily_candles WHERE code=?
     ),last_error=NULL
     WHERE code=?
-  `).bind(isoNow(),code,code).run();
+  `).bind(isoNow(),code,code).run().then(result=>{addD1WriteMetrics(metrics,result);return result;});
 }
-async function markIndicatorsError(db,code,error) {
+async function markIndicatorsError(db,code,error,metrics=null) {
   // Keep status='pending'; a diagnostic write must never clear the retry state.
   await db.prepare(`
     UPDATE indicator_sync_state
     SET last_error=?
     WHERE code=? AND status='pending'
-  `).bind(String(error?.message||error).slice(0,1000),code).run();
+  `).bind(String(error?.message||error).slice(0,1000),code).run().then(result=>{addD1WriteMetrics(metrics,result);return result;});
 }
 async function indicatorsArePending(db,code) {
   const row=await db.prepare(`
@@ -787,16 +798,16 @@ async function indicatorsArePending(db,code) {
   `).bind(code).first();
   return !!row;
 }
-async function saveIndicatorsWithState(db,code,rows,refreshTimestamp=false) {
+async function saveIndicatorsWithState(db,code,rows,refreshTimestamp=false,metrics=null) {
   // If this write fails, do not start indicator batches.
-  await markIndicatorsPending(db,code);
+  await markIndicatorsPending(db,code,metrics);
   try {
-    const saved=await saveIndicators(db,code,rows,refreshTimestamp);
+    const saved=await saveIndicators(db,code,rows,refreshTimestamp,metrics);
     // Only complete after every saveIndicators batch has succeeded.
-    await markIndicatorsCompleted(db,code);
+    await markIndicatorsCompleted(db,code,metrics);
     return saved;
   } catch(error) {
-    try { await markIndicatorsError(db,code,error); } catch (_) {}
+    try { await markIndicatorsError(db,code,error,metrics); } catch (_) {}
     throw error;
   }
 }
@@ -1045,6 +1056,7 @@ async function syncData(env,url) {
     const days=Math.min(2500,Math.max(120,Number(url.searchParams.get('days')||700)));
     const minCandles=Math.min(250,Math.max(120,Number(url.searchParams.get('minCandles')||120)));
     const provider='naver',errors=[],indicatorErrors=[];
+    const d1Metrics=url.searchParams.get('telemetry')==='1'?{rowsWritten:0,changes:0,statements:0}:null;
     let saved=0,updated=0,unchanged=0,d1RowsRead=0;
     let indicatorStocksRecalculated=0,indicatorStocksSkipped=0;
     let indicatorStocksUnchanged=0,indicatorRowsProcessed=0;
@@ -1068,7 +1080,7 @@ async function syncData(env,url) {
           await sleep(KIS_MIN_INTERVAL_MS);
         }
 
-        const writeResult=await saveCandles(db,s.code,rows);
+        const writeResult=await saveCandles(db,s.code,rows,d1Metrics);
         d1RowsRead+=Number(writeResult.rowsRead||0);
         saved+=writeResult.inserted;
         updated+=writeResult.updated;
@@ -1140,7 +1152,7 @@ async function syncData(env,url) {
               if(indicatorRows.length<minCandles){
                 indicatorStocksSkipped++;
               }else{
-                await saveIndicatorsWithState(db,s.code,indicatorRows,false);
+                await saveIndicatorsWithState(db,s.code,indicatorRows,false,d1Metrics);
                 indicatorStocksRecalculated++;
                 indicatorRowsProcessed+=indicatorRows.length;
               }
@@ -1176,6 +1188,7 @@ async function syncData(env,url) {
       indicatorStocksUnchanged,
       indicatorRowsProcessed,
       d1RowsRead,
+      ...(d1Metrics?{d1RowsWritten:d1Metrics.rowsWritten,d1WriteChanges:d1Metrics.changes,d1WriteStatements:d1Metrics.statements,d1WriteMetricScope:'candle and indicator D1 writes only; excludes history-job bookkeeping'}:{}),
       indicatorFailed:indicatorErrors.length,
       indicatorErrors:indicatorErrors.slice(0,20),
       failed:errors.length,
@@ -1310,7 +1323,7 @@ async function historySyncJob(env,url) {
   }
 
   try {
-    const candleUrl=new URL('/api/data/sync?type=candles&provider=naver&days=700&minCandles=120&limit=1&code='+encodeURIComponent(selected.code),url.origin);
+    const candleUrl=new URL('/api/data/sync?type=candles&provider=naver&days=700&minCandles=120&limit=1&telemetry=1&code='+encodeURIComponent(selected.code),url.origin);
     const result=await syncData(env,candleUrl);
     if(!result.ok||result.failed>0||result.indicatorFailed>0) {
       const reason=JSON.stringify({errors:result.errors||[],indicatorErrors:result.indicatorErrors||[]}).slice(0,1500);
@@ -1326,7 +1339,7 @@ async function historySyncJob(env,url) {
     ]);
     const latest=await getJob();
     return {ok:true,action,status:'running',phase:latest.phase,code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
-      candleResult:result,d1RowsRead:Number(result.d1RowsRead||0),progress:{processed:latest.processed,afterCode:latest.after_code,
+      candleResult:result,d1RowsRead:Number(result.d1RowsRead||0),d1RowsWritten:Number(result.d1RowsWritten||0),d1WriteChanges:Number(result.d1WriteChanges||0),d1WriteStatements:Number(result.d1WriteStatements||0),d1WriteMetricScope:result.d1WriteMetricScope||null,progress:{processed:latest.processed,afterCode:latest.after_code,
       candlesInserted:latest.candles_inserted,candlesUpdated:latest.candles_updated,
       indicatorsRecalculated:latest.indicators_recalculated,indicatorRowsProcessed:latest.indicator_rows_processed,
       dailyReservedWrites:latest.daily_reserved_writes,dailyBudgetWrites:latest.daily_budget_writes},
