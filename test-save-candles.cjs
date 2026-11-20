@@ -1,7 +1,8 @@
 ﻿const fs = require("fs");
 
 const source = fs.readFileSync("index.js", "utf8");
-const startMatch = source.match(/async function saveCandles\s*\(/);\nconst start = startMatch ? startMatch.index : -1;
+const startMatch = source.match(/async function saveCandles\s*\(/);
+const start = startMatch ? startMatch.index : -1;
 const end = source.indexOf("\nasync function saveIndicators", start);
 
 if (start < 0 || end < 0) {
