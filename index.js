@@ -517,11 +517,22 @@ async function ensureSecuritySchema(db){
       day_key TEXT NOT NULL,
       daily_reserved_writes INTEGER NOT NULL DEFAULT 0,
       daily_budget_writes INTEGER NOT NULL DEFAULT 70000,
-      reserve_per_stock INTEGER NOT NULL DEFAULT 1100,
+      reserve_per_stock INTEGER NOT NULL DEFAULT 5000,
+      daily_actual_rows_written INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
       started_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`).run();
+    const historyJobInfo=await db.prepare('PRAGMA table_info(history_sync_job)').all();
+    const historyJobCols=new Set((historyJobInfo.results||[]).map(x=>String(x.name)));
+    if(!historyJobCols.has('daily_actual_rows_written')){
+      try{await db.prepare('ALTER TABLE history_sync_job ADD COLUMN daily_actual_rows_written INTEGER NOT NULL DEFAULT 0').run();}
+      catch(error){
+        const fresh=await db.prepare('PRAGMA table_info(history_sync_job)').all();
+        const freshCols=new Set((fresh.results||[]).map(x=>String(x.name)));
+        if(!freshCols.has('daily_actual_rows_written'))throw error;
+      }
+    }
     securitySchemaReady=true;
   })().catch(e=>{securitySchemaPromise=null;throw e;});
   return securitySchemaPromise;
@@ -1220,15 +1231,22 @@ async function syncData(env,url) {
   }
   throw new Error('지원하지 않는 sync type입니다. universe, quotes, candles, indicators 중 하나를 사용하세요.');
 }
-// One stock per request; the server reserves a conservative D1 write budget before processing.
+// Compare reserved and measured writes; whichever is higher governs the daily cap.
+function historyBudgetDecision(reserved,actual,reserve,budget){
+  const committed=Math.max(Number(reserved)||0,Number(actual)||0);
+  const projected=committed+(Number(reserve)||0);
+  const cap=Math.max(0,Number(budget)||0);
+  return {allowed:projected<=cap,committed,projected,remaining:Math.max(0,cap-committed)};
+}
+// One stock per request; 5,000 rows per stock and a 25,000-row daily backfill cap preserve quota headroom.
 async function historySyncJob(env,url) {
   const db=requireDb(env);
   const jobId='history-backfill-v1';
   const action=String(url.searchParams.get('action')||'status').toLowerCase();
   const now=new Date().toISOString();
   const dayKey=now.slice(0,10);
-  const dailyBudget=70000;
-  const reservePerStock=1100;
+  const dailyBudget=25000;
+  const reservePerStock=5000;
   const getJob=()=>db.prepare('SELECT * FROM history_sync_job WHERE job_id=?').bind(jobId).first();
   let job=await getJob();
 
@@ -1261,12 +1279,12 @@ async function historySyncJob(env,url) {
     await db.prepare(`
       INSERT INTO history_sync_job(job_id,status,run_id,after_code,phase,processed,failed,candles_inserted,candles_updated,
         indicators_recalculated,indicator_rows_processed,day_key,daily_reserved_writes,daily_budget_writes,
-        reserve_per_stock,last_error,started_at,updated_at)
-      VALUES(?,'running',?,'',0,0,0,0,0,0,0,?,?,?, ?,NULL,?,?)
+        reserve_per_stock,daily_actual_rows_written,last_error,started_at,updated_at)
+      VALUES(?,'running',?,'',0,0,0,0,0,0,0,?,?,?,?,0,NULL,?,?)
       ON CONFLICT(job_id) DO UPDATE SET status='running',run_id=excluded.run_id,after_code='',phase=0,processed=0,failed=0,
         candles_inserted=0,candles_updated=0,indicators_recalculated=0,indicator_rows_processed=0,
         day_key=excluded.day_key,daily_reserved_writes=excluded.daily_reserved_writes,daily_budget_writes=excluded.daily_budget_writes,
-        reserve_per_stock=excluded.reserve_per_stock,last_error=NULL,started_at=excluded.started_at,updated_at=excluded.updated_at
+        reserve_per_stock=excluded.reserve_per_stock,daily_actual_rows_written=0,last_error=NULL,started_at=excluded.started_at,updated_at=excluded.updated_at
     `).bind(jobId,runId,dayKey,initialReserve,dailyBudget,reservePerStock,now,now).run();
     return {ok:true,action,status:'running',runId,queuedCount,initialReservedWrites:initialReserve,queueBuildRowsRead,message:'60~119거래일 종목을 먼저, 0~59거래일 종목을 다음으로 처리하도록 작업 목록을 만들었습니다.',dailyBudgetWrites:dailyBudget,reservePerStock,at:now};
   }
@@ -1278,7 +1296,7 @@ async function historySyncJob(env,url) {
   if(action==='resume') {
     if(job.status==='completed') throw new Error('이미 완료된 작업입니다. 새로 시작하려면 action=start를 사용하세요.');
     if(job.day_key!==dayKey) {
-      await db.prepare("UPDATE history_sync_job SET status='running',day_key=?,daily_reserved_writes=0,last_error=NULL,updated_at=? WHERE job_id=?").bind(dayKey,now,jobId).run();
+      await db.prepare("UPDATE history_sync_job SET status='running',day_key=?,daily_reserved_writes=0,daily_actual_rows_written=0,daily_budget_writes=?,reserve_per_stock=?,last_error=NULL,updated_at=? WHERE job_id=?").bind(dayKey,dailyBudget,reservePerStock,now,jobId).run();
     } else {
       await db.prepare("UPDATE history_sync_job SET status='running',last_error=NULL,updated_at=? WHERE job_id=?").bind(now,jobId).run();
     }
@@ -1289,15 +1307,21 @@ async function historySyncJob(env,url) {
   if(job.status!=='running') return {ok:true,action,status:job.status,afterCode:job.after_code,dailyReservedWrites:job.daily_reserved_writes,dailyBudgetWrites:job.daily_budget_writes,lastError:job.last_error||null,message:'실행 상태가 아닙니다. resume 또는 start가 필요합니다.',at:now};
 
   if(job.day_key!==dayKey) {
-    await db.prepare("UPDATE history_sync_job SET day_key=?,daily_reserved_writes=0,updated_at=? WHERE job_id=?").bind(dayKey,now,jobId).run();
+    await db.prepare("UPDATE history_sync_job SET day_key=?,daily_reserved_writes=0,daily_actual_rows_written=0,daily_budget_writes=?,reserve_per_stock=?,updated_at=? WHERE job_id=?").bind(dayKey,dailyBudget,reservePerStock,now,jobId).run();
     job=await getJob();
   }
-  const reserve=Number(job.reserve_per_stock)||reservePerStock;
-  const budget=Number(job.daily_budget_writes)||dailyBudget;
+  const reserve=Math.max(Number(job.reserve_per_stock)||0,reservePerStock);
+  const budget=Math.min(Number(job.daily_budget_writes)||dailyBudget,dailyBudget);
   const reserved=Number(job.daily_reserved_writes)||0;
-  if(reserved+reserve>budget) {
+  const actual=Number(job.daily_actual_rows_written)||0;
+  if(Number(job.reserve_per_stock)!==reserve||Number(job.daily_budget_writes)!==budget){
+    await db.prepare("UPDATE history_sync_job SET reserve_per_stock=?,daily_budget_writes=?,updated_at=? WHERE job_id=?").bind(reserve,budget,now,jobId).run();
+    job=await getJob();
+  }
+  const budgetCheck=historyBudgetDecision(reserved,actual,reserve,budget);
+  if(!budgetCheck.allowed) {
     await db.prepare("UPDATE history_sync_job SET status='budget_wait',updated_at=? WHERE job_id=?").bind(now,jobId).run();
-    return {ok:true,action,status:'budget_wait',afterCode:job.after_code,processed:job.processed,dailyReservedWrites:reserved,dailyBudgetWrites:budget,reservePerStock:reserve,message:'일일 안전 예산에 도달했습니다. UTC 날짜가 바뀐 뒤 resume 하세요.',at:now};
+    return {ok:true,action,status:'budget_wait',afterCode:job.after_code,processed:job.processed,dailyReservedWrites:reserved,dailyActualRowsWritten:actual,dailyBudgetWrites:budget,reservePerStock:reserve,budgetCheck,message:'일일 안전 예산에 도달했습니다. UTC 날짜가 바뀐 뒤 resume 하세요.',at:now};
   }
 
   let selected=await db.prepare("SELECT code,name,initial_candle_count AS candle_count FROM history_sync_queue WHERE run_id=? AND phase=? AND status='pending' ORDER BY code LIMIT 1").bind(job.run_id,Number(job.phase)||0).first();
@@ -1334,15 +1358,15 @@ async function historySyncJob(env,url) {
       db.prepare("UPDATE history_sync_queue SET status='completed',updated_at=? WHERE run_id=? AND code=? AND status='pending'").bind(isoNow(),job.run_id,selected.code),
       db.prepare(`UPDATE history_sync_job SET after_code=?,processed=processed+1,
         candles_inserted=candles_inserted+?,candles_updated=candles_updated+?,
-        indicators_recalculated=indicators_recalculated+?,indicator_rows_processed=indicator_rows_processed+?,
-        last_error=NULL,updated_at=? WHERE job_id=?`).bind(selected.code,result.candlesSaved||0,result.candlesUpdated||0,result.indicatorStocksRecalculated||0,result.indicatorRowsProcessed||0,isoNow(),jobId)
+        indicators_recalculated=indicators_recalculated+?,indicator_rows_processed=indicator_rows_processed+?,daily_actual_rows_written=daily_actual_rows_written+?,
+        last_error=NULL,updated_at=? WHERE job_id=?`).bind(selected.code,result.candlesSaved||0,result.candlesUpdated||0,result.indicatorStocksRecalculated||0,result.indicatorRowsProcessed||0,Number(result.d1RowsWritten||0),isoNow(),jobId)
     ]);
     const latest=await getJob();
     return {ok:true,action,status:'running',phase:latest.phase,code:selected.code,name:selected.name,priorCandleCount:selected.candle_count,
       candleResult:result,d1RowsRead:Number(result.d1RowsRead||0),d1RowsWritten:Number(result.d1RowsWritten||0),d1WriteChanges:Number(result.d1WriteChanges||0),d1WriteStatements:Number(result.d1WriteStatements||0),d1WriteMetricScope:result.d1WriteMetricScope||null,progress:{processed:latest.processed,afterCode:latest.after_code,
       candlesInserted:latest.candles_inserted,candlesUpdated:latest.candles_updated,
       indicatorsRecalculated:latest.indicators_recalculated,indicatorRowsProcessed:latest.indicator_rows_processed,
-      dailyReservedWrites:latest.daily_reserved_writes,dailyBudgetWrites:latest.daily_budget_writes},
+      dailyReservedWrites:latest.daily_reserved_writes,dailyActualRowsWritten:latest.daily_actual_rows_written,dailyBudgetWrites:latest.daily_budget_writes},
       message:'종목 1개 처리를 완료했습니다. 다음 step을 호출하면 이어서 진행합니다.',at:isoNow()};
   } catch(error) {
     await db.prepare("UPDATE history_sync_job SET status='error',failed=failed+1,last_error=?,updated_at=? WHERE job_id=?").bind(String(error?.message||error).slice(0,1500),isoNow(),jobId).run();
