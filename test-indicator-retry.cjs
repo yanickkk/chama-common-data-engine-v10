@@ -48,7 +48,7 @@ function extractFunction(name) {
 }
 
 const names = [
-  "saveIndicators", "markIndicatorsPending", "markIndicatorsCompleted",
+  "addD1WriteMetrics", "saveIndicators", "markIndicatorsPending", "markIndicatorsCompleted",
   "markIndicatorsError", "indicatorsArePending", "saveIndicatorsWithState"
 ];
 
