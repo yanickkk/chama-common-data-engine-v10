@@ -97,9 +97,9 @@ export async function syncDartCorpMappings(env) {
 
       const corpCode = xmlTag(block, 'corp_code');
       const corpName = xmlTag(block, 'corp_name');
-      const stockCode = xmlTag(block, 'stock_code');
+      const stockCode = xmlTag(block, 'stock_code').trim().toUpperCase();
       const modifyDate = xmlTag(block, 'modify_date');
-      if (!/^\d{8}$/.test(corpCode) || !/^\d{6}$/.test(stockCode)) continue;
+      if (!/^\d{8}$/.test(corpCode) || !/^[0-9A-Z]{6}$/.test(stockCode) || stockCode === '000000') continue;
 
       parsedListedCompanies++;
       const stock = eligible.get(stockCode);
