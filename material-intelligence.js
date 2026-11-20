@@ -5,8 +5,12 @@ function decodeXml(value) {
     .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 }
 function xmlTag(block, name) {
-  const m = block.match(new RegExp('<' + name + '>([\s\S]*?)</' + name + '>'));
-  return m ? decodeXml(m[1].trim()) : '';
+  const open = '<' + name + '>', close = '</' + name + '>';
+  const start = block.indexOf(open);
+  if (start < 0) return '';
+  const valueStart = start + open.length;
+  const end = block.indexOf(close, valueStart);
+  return end < 0 ? '' : decodeXml(block.slice(valueStart, end).trim());
 }
 async function readZipXml(buffer) {
   const bytes = new Uint8Array(buffer);
