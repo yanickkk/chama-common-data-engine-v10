@@ -1,12 +1,22 @@
-param(
+﻿param(
   [string]$BaseUrl = "https://chama-market-proxy.yanick-lee.workers.dev",
   [int]$MaxSteps = 25,
   [int]$DelaySeconds = 2,
   [switch]$StartFresh
 )
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-$OutputEncoding = [System.Text.UTF8Encoding]::new()
+
+# Windows PowerShell 5.1 reads UTF-8 scripts correctly only when the file has a BOM.
+# Switch the Windows console code page as well as .NET and native-pipeline encodings.
+try {
+  & "$env:SystemRoot\System32\chcp.com" 65001 > $null
+} catch {
+  # PowerShell 7 terminals are normally UTF-8 already; continue with .NET settings.
+}
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
 if ($MaxSteps -lt 1) { throw "MaxSteps는 1 이상이어야 합니다." }
 if ($DelaySeconds -lt 0) { throw "DelaySeconds는 0 이상이어야 합니다." }
 $BaseUrl = $BaseUrl.TrimEnd("/")
