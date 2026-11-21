@@ -41,9 +41,10 @@ async function fetchNaver(codes){
     const pct=num(item.cr??item.changeRate??item.fluctuationsRatio);
     const vol=num(item.aq??item.accumulatedTradingVolume??item.volume)||0;
     const value=num(item.aa??item.accumulatedTradingValue??item.tradingValue??item.tradeValue);
+    const open=num(item.ov??item.openPrice??item.open??item.stck_oprc);
     const name=item.nm??item.name??item.stockName??item.itemName??'';
     if(price==null && pct==null && value==null)return;
-    map[code]={...(map[code]||{}),code,name,price,previousClose:prev,change:ch??(price!=null&&prev!=null?price-prev:null),changePct:pct??(price!=null&&prev?((price-prev)/prev)*100:0),volume:vol,value:value??(price!=null?price*vol:null),source,updatedAt:new Date().toISOString()};
+    map[code]={...(map[code]||{}),code,name,price,open,previousClose:prev,change:ch??(price!=null&&prev!=null?price-prev:null),changePct:pct??(price!=null&&prev?((price-prev)/prev)*100:0),volume:vol,value:value??(price!=null?price*vol:null),source,updatedAt:new Date().toISOString()};
   };
   async function requestJson(url,headers={}){const r=await fetch(url,{headers:{'User-Agent':N,'Accept':'application/json,*/*','Referer':'https://m.stock.naver.com/',...headers}});if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();}
 
@@ -347,7 +348,8 @@ async function screenMarket(market,top,rawCfg,env){
     const changePct=q.changePct??u.changePct;
     const volume=q.volume??u.volume??0;
     const value=q.value??u.value??((price!=null)?price*volume:0);
-    return {...u,...q,price,changePct,volume,value,quoteSource:q.source||'UNIVERSE-SNAPSHOT'};
+    const open=q.open??u.open??u.openPrice??null;
+    return {...u,...q,price,open,changePct,volume,value,quoteSource:q.source||'UNIVERSE-SNAPSHOT'};
   }).filter(x=>x.price!=null || x.value>0);
 
   // 당일 상승률 Top100의 모수가 전체 시장이어야 하므로, 거래대금 조건을 먼저 적용한 뒤 상승률 순으로 정렬합니다.
@@ -395,6 +397,19 @@ async function screenMarket(market,top,rawCfg,env){
     (calendar[e.selectedDate]??=[]).push({code:e.code,name:e.name,selectedDate:e.selectedDate,day0Date:e.day0Date,achievementRisePct:e.achievementRisePct,achievementCandlePct:e.achievementCandlePct});
   }
 
+  // Read-only market movers derived from the same verified full-market snapshot.
+  // Bullish turnover requires a verified opening price; rows without it are not guessed.
+  const marketRankings={
+    gainers:merged.filter(x=>Number.isFinite(Number(x.changePct))&&Number(x.price)>0)
+      .sort((a,b)=>Number(b.changePct)-Number(a.changePct)||Number(b.value||0)-Number(a.value||0))
+      .slice(0,10).map(x=>({code:x.code,name:x.name,market:x.market,price:x.price,changePct:x.changePct,tradeValue:x.value??0,quoteSource:x.quoteSource})),
+    bullishTurnover:merged.filter(x=>Number(x.open)>0&&Number(x.price)>Number(x.open)&&Number(x.value)>0)
+      .sort((a,b)=>Number(b.value)-Number(a.value))
+      .slice(0,10).map(x=>({code:x.code,name:x.name,market:x.market,price:x.price,open:x.open,changePct:x.changePct,tradeValue:x.value,quoteSource:x.quoteSource})),
+    dataQuality:{snapshotCount:merged.length,gainersCount:merged.filter(x=>Number.isFinite(Number(x.changePct))&&Number(x.price)>0).length,openPriceCount:merged.filter(x=>Number(x.open)>0).length,bullishTurnoverCount:merged.filter(x=>Number(x.open)>0&&Number(x.price)>Number(x.open)&&Number(x.value)>0).length},
+    notes:{gainers:'검증된 KOSPI/KOSDAQ 보통주·우선주 중 시세 스냅샷 확보 종목 기준',bullishTurnover:'시가와 현재가가 모두 확인된 양봉 종목만 포함. 시가 미확인 종목은 제외'}
+  };
+
   let themeLeadership={status:'THEME_SCHEMA_NOT_READY',themeCount:0,themes:[],dataQuality:{eligibleMarketQuotes:merged.length,themeMembershipRows:0},error:null};
   let leaderTop10=[];
   try{
@@ -418,6 +433,7 @@ async function screenMarket(market,top,rawCfg,env){
     cmCandidates:cmCandidates.slice(0,top),
     themeLeadership,
     leaderTop10,
+    marketRankings,
     calendar,
     scannedAt:new Date().toISOString(),
     workerVersion:'v11.4-common-preferred-policy',
