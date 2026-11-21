@@ -35,7 +35,7 @@ const top10 = buildQualifiedLeaderTop10(
   [{ code: '000002', achievementRisePct: 55 }, { code: '000004', achievementRisePct: 60 }],
   10
 );
-assert.deepEqual(top10.map(x => x.code), ['000001', '000002']);
+assert.deepEqual(top10.map(x => x.code), ['000001', '000002', '000004']);
 assert.deepEqual(top10[0].signals, ['CHAMAZONE']);
 assert.deepEqual(top10[1].signals, ['CM']);
 assert.equal(top10[0].primaryThemeCode, 'T1');
