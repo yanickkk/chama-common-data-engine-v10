@@ -1238,14 +1238,14 @@ function historyBudgetDecision(reserved,actual,reserve,budget){
   const cap=Math.max(0,Number(budget)||0);
   return {allowed:projected<=cap,committed,projected,remaining:Math.max(0,cap-committed)};
 }
-// One stock per request; 5,000 rows per stock and a 25,000-row daily backfill cap preserve quota headroom.
+// One stock per request; keep 5,000 rows reserved per stock and use an 80,000-row temporary backfill cap (Cloudflare Free write quota: 100,000/day).
 async function historySyncJob(env,url) {
   const db=requireDb(env);
   const jobId='history-backfill-v1';
   const action=String(url.searchParams.get('action')||'status').toLowerCase();
   const now=new Date().toISOString();
   const dayKey=now.slice(0,10);
-  const dailyBudget=25000;
+  const dailyBudget=80000;
   const reservePerStock=5000;
   const getJob=()=>db.prepare('SELECT * FROM history_sync_job WHERE job_id=?').bind(jobId).first();
   let job=await getJob();
@@ -1298,7 +1298,8 @@ async function historySyncJob(env,url) {
     if(job.day_key!==dayKey) {
       await db.prepare("UPDATE history_sync_job SET status='running',day_key=?,daily_reserved_writes=0,daily_actual_rows_written=0,daily_budget_writes=?,reserve_per_stock=?,last_error=NULL,updated_at=? WHERE job_id=?").bind(dayKey,dailyBudget,reservePerStock,now,jobId).run();
     } else {
-      await db.prepare("UPDATE history_sync_job SET status='running',last_error=NULL,updated_at=? WHERE job_id=?").bind(now,jobId).run();
+      // Apply the temporary cap immediately on resume without resetting today's usage or cursor.
+      await db.prepare("UPDATE history_sync_job SET status='running',daily_budget_writes=?,reserve_per_stock=?,last_error=NULL,updated_at=? WHERE job_id=?").bind(dailyBudget,reservePerStock,now,jobId).run();
     }
     job=await getJob();
     return {ok:true,action,status:job.status,afterCode:job.after_code,dailyReservedWrites:job.daily_reserved_writes,dailyBudgetWrites:job.daily_budget_writes,at:now};
