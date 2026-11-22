@@ -1,3 +1,4 @@
+import { buildThemeLeadership, buildQualifiedLeaderTop10 } from './leader-discovery.js';
 /**
  * 차마 족보 - 국내시장 자동 스크리너 Worker
  *
@@ -40,9 +41,10 @@ async function fetchNaver(codes){
     const pct=num(item.cr??item.changeRate??item.fluctuationsRatio);
     const vol=num(item.aq??item.accumulatedTradingVolume??item.volume)||0;
     const value=num(item.aa??item.accumulatedTradingValue??item.tradingValue??item.tradeValue);
+    const open=num(item.ov??item.openPrice??item.open??item.stck_oprc);
     const name=item.nm??item.name??item.stockName??item.itemName??'';
     if(price==null && pct==null && value==null)return;
-    map[code]={...(map[code]||{}),code,name,price,previousClose:prev,change:ch??(price!=null&&prev!=null?price-prev:null),changePct:pct??(price!=null&&prev?((price-prev)/prev)*100:0),volume:vol,value:value??(price!=null?price*vol:null),source,updatedAt:new Date().toISOString()};
+    map[code]={...(map[code]||{}),code,name,price,open,previousClose:prev,change:ch??(price!=null&&prev!=null?price-prev:null),changePct:pct??(price!=null&&prev?((price-prev)/prev)*100:0),volume:vol,value:value??(price!=null?price*vol:null),source,updatedAt:new Date().toISOString()};
   };
   async function requestJson(url,headers={}){const r=await fetch(url,{headers:{'User-Agent':N,'Accept':'application/json,*/*','Referer':'https://m.stock.naver.com/',...headers}});if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();}
 
@@ -320,7 +322,7 @@ async function fetchUniverse(market){
     warning:complete?null:'네이버 신규 상장종목 목록의 모든 페이지를 확인하지 못했습니다. 이 결과로 유니버스 저장 또는 전체시장 스캔을 진행하면 안 됩니다.'
   };
 }
-async function screenMarket(market,top,rawCfg){
+async function screenMarket(market,top,rawCfg,env){
   const cfg=mergeConfig({...rawCfg,market,top});
   const universeResult=await fetchUniverse(market);
   if(!universeResult.complete)throw new Error(`종목 유니버스 수집이 불완전합니다. pages=${universeResult.pages}, received=${universeResult.sourceItemCount}, expected=${universeResult.totalCount??'unknown'}; ${(universeResult.errors||[]).join(' | ')}`);
@@ -346,7 +348,8 @@ async function screenMarket(market,top,rawCfg){
     const changePct=q.changePct??u.changePct;
     const volume=q.volume??u.volume??0;
     const value=q.value??u.value??((price!=null)?price*volume:0);
-    return {...u,...q,price,changePct,volume,value,quoteSource:q.source||'UNIVERSE-SNAPSHOT'};
+    const open=q.open??u.open??u.openPrice??null;
+    return {...u,...q,price,open,changePct,volume,value,quoteSource:q.source||'UNIVERSE-SNAPSHOT'};
   }).filter(x=>x.price!=null || x.value>0);
 
   // 당일 상승률 Top100의 모수가 전체 시장이어야 하므로, 거래대금 조건을 먼저 적용한 뒤 상승률 순으로 정렬합니다.
@@ -394,6 +397,29 @@ async function screenMarket(market,top,rawCfg){
     (calendar[e.selectedDate]??=[]).push({code:e.code,name:e.name,selectedDate:e.selectedDate,day0Date:e.day0Date,achievementRisePct:e.achievementRisePct,achievementCandlePct:e.achievementCandlePct});
   }
 
+  // Read-only market movers derived from the same verified full-market snapshot.
+  // Bullish turnover requires a verified opening price; rows without it are not guessed.
+  const marketRankings={
+    gainers:merged.filter(x=>Number.isFinite(Number(x.changePct))&&Number(x.price)>0)
+      .sort((a,b)=>Number(b.changePct)-Number(a.changePct)||Number(b.value||0)-Number(a.value||0))
+      .slice(0,10).map(x=>({code:x.code,name:x.name,market:x.market,price:x.price,changePct:x.changePct,tradeValue:x.value??0,quoteSource:x.quoteSource})),
+    bullishTurnover:merged.filter(x=>Number(x.open)>0&&Number(x.price)>Number(x.open)&&Number(x.value)>0)
+      .sort((a,b)=>Number(b.value)-Number(a.value))
+      .slice(0,10).map(x=>({code:x.code,name:x.name,market:x.market,price:x.price,open:x.open,changePct:x.changePct,tradeValue:x.value,quoteSource:x.quoteSource})),
+    dataQuality:{snapshotCount:merged.length,gainersCount:merged.filter(x=>Number.isFinite(Number(x.changePct))&&Number(x.price)>0).length,openPriceCount:merged.filter(x=>Number(x.open)>0).length,bullishTurnoverCount:merged.filter(x=>Number(x.open)>0&&Number(x.price)>Number(x.open)&&Number(x.value)>0).length},
+    notes:{gainers:'검증된 KOSPI/KOSDAQ 보통주·우선주 중 시세 스냅샷 확보 종목 기준',bullishTurnover:'시가와 현재가가 모두 확인된 양봉 종목만 포함. 시가 미확인 종목은 제외'}
+  };
+
+  let themeLeadership={status:'THEME_SCHEMA_NOT_READY',themeCount:0,themes:[],dataQuality:{eligibleMarketQuotes:merged.length,themeMembershipRows:0},error:null};
+  let leaderTop10=[];
+  try{
+    const memberships=await readAllThemeMemberships(env);
+    themeLeadership=buildThemeLeadership(merged,memberships,{...(cfg.themeLeadership||{}),topN:cfg.themeLeadership?.topN||10});
+    leaderTop10=buildQualifiedLeaderTop10(themeLeadership,chamaCandidates,cmCandidates,10);
+  }catch(error){
+    themeLeadership={...themeLeadership,error:error?.message||String(error)};
+  }
+
   return {
     universeCount:universe.length,
     commonStockCount,preferredStockCount,classificationUnverifiedCount,productExcludedCount,
@@ -405,6 +431,9 @@ async function screenMarket(market,top,rawCfg){
     analysisCount:chamaTargets.length,
     chamaCandidates:chamaCandidates.slice(0,top),
     cmCandidates:cmCandidates.slice(0,top),
+    themeLeadership,
+    leaderTop10,
+    marketRankings,
     calendar,
     scannedAt:new Date().toISOString(),
     workerVersion:'v11.4-common-preferred-policy',
@@ -1844,6 +1873,29 @@ async function importNaverThemes(env, body) {
   };
 }
 
+// ---- Theme leadership read model ---------------------------------------------
+async function readAllThemeMemberships(env) {
+  const db=requireDb(env);
+  const r=await db.prepare(`
+    SELECT m.code,s.name,s.market,
+      s.security_type AS securityType,
+      s.security_verified AS securityVerified,
+      m.theme_code AS themeCode,
+      t.theme_name AS themeName,
+      m.evidence_status AS evidenceStatus,
+      m.active
+    FROM theme_stock_map m
+    INNER JOIN stocks s ON s.code=m.code
+    INNER JOIN themes t ON t.theme_code=m.theme_code
+    WHERE m.active=1 AND t.active=1 AND s.active=1
+      AND s.security_verified=1
+      AND s.security_type IN ('COMMON','PREFERRED')
+      AND upper(s.market) IN ('KOSPI','KOSDAQ')
+    ORDER BY m.theme_code,m.code
+  `).all();
+  return r.results||[];
+}
+
 // ---- Theme mapping and core materials read APIs v1 ---------------------------
 async function readThemes(env) {
   const db=requireDb(env);
@@ -1901,7 +1953,7 @@ export default {async fetch(request,env){const url=new URL(request.url);if(reque
   if(['/api/data/quote','/api/data/candles','/api/data/indicators'].includes(url.pathname)){try{return json(await dataRead(env,url,url.pathname),request);}catch(e){return json({ok:false,error:e.message},request,400);}}
   if(url.pathname==='/api/kis/test'){try{const code=normalizeStockCode(url.searchParams.get('code')||'005930');await requireEligibleStock(env,code);const q=await kisQuote(env,code);return json({ok:true,authenticated:true,quote:q,mode:env.KIS_MODE||'paper'},request);}catch(e){return json({ok:false,error:e.message},request,502);}}
   const isMarket=['/api/market','/api/market/'].includes(url.pathname), isAnalysis=['/api/analysis','/api/analysis/'].includes(url.pathname), isScreen=['/api/screener','/api/screener/'].includes(url.pathname); if(!isMarket&&!isAnalysis&&!isScreen)return json({ok:false,error:'Not Found'},request,404);
-  if(isScreen){const market=(url.searchParams.get('market')||'ALL').toUpperCase();const top=Math.min(10,Math.max(1,Number(url.searchParams.get('top')||10)));let cfg={};const raw=url.searchParams.get('config');if(raw){try{cfg=JSON.parse(decodeURIComponent(raw));}catch(e){return json({ok:false,error:'config JSON 형식 오류'},request,400);}}try{return json({ok:true,...await screenMarket(market,top,cfg)},request);}catch(e){return json({ok:false,error:e?.message||String(e)},request,502);}}
+  if(isScreen){const market=(url.searchParams.get('market')||'ALL').toUpperCase();const top=Math.min(10,Math.max(1,Number(url.searchParams.get('top')||10)));let cfg={};const raw=url.searchParams.get('config');if(raw){try{cfg=JSON.parse(decodeURIComponent(raw));}catch(e){return json({ok:false,error:'config JSON 형식 오류'},request,400);}}try{return json({ok:true,...await screenMarket(market,top,cfg,env)},request);}catch(e){return json({ok:false,error:e?.message||String(e)},request,502);}}
   const codes=[...new Set((url.searchParams.get('codes')||'').split(',').map(normalizeStockCode).filter(isValidStockCode))];if(!codes.length)return json({ok:false,error:'codes parameter is required'},request,400);if(codes.length>80)return json({ok:false,error:'Too many codes'},request,400);
   if(isAnalysis)return json({ok:true,quotes:await getAnalysis(codes,env),time:new Date().toISOString(),note:'검증된 코스피·코스닥 보통주/우선주만 Naver realtime + daily chart로 조회합니다.'},request);
   return json({ok:true,quotes:await getQuotes(codes,env),time:new Date().toISOString()},request);
